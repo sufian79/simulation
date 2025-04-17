@@ -29,9 +29,9 @@ stiffness = {
 
 # Damping
 damping = {
-    "pedestal": st.sidebar.number_input("Damping (Pedestal) [Ns/m]", 1, 1e4, 2210.7),
-    "shaft": st.sidebar.number_input("Damping (Shaft) [Ns/m]", 1, 1e4, 1376.8),
-    "sprung": st.sidebar.number_input("Damping (Sprung) [Ns/m]", 1, 1e4, 500)
+    "pedestal": st.sidebar.number_input("Damping (Pedestal) [Ns/m]", min_value=1.0, max_value=1e4, value=2210.7),
+    "shaft": st.sidebar.number_input("Damping (Shaft) [Ns/m]", min_value=1.0, max_value=1e4, value=1376.8),
+    "sprung": st.sidebar.number_input("Damping (Sprung) [Ns/m]", min_value=1.0, max_value=1e4, value=500.0)
 }
 
 # Ball contact
