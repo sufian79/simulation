@@ -1,177 +1,132 @@
-import numpy as np
-import matplotlib.pyplot as plt
 import streamlit as st
-import pandas as pd
-from scipy.integrate import solve_ivp
-from scipy.signal import hilbert, butter, filtfilt
+import numpy as np
+from scipy.signal import butter, lfilter, hilbert
+from bokeh.plotting import figure
+from bokeh.layouts import column
+from bokeh.models import Span
 
-# ----------------------------
-# STREAMLIT SIDEBAR CONTROLS
-# ----------------------------
-st.sidebar.header("Simulation Settings")
+# === Sidebar Inputs: Bearing Geometry Parameters ===
+st.sidebar.header("Bearing Geometry Parameters")
+n = st.sidebar.number_input("Number of Rolling Elements (n)", value=7)
+R = st.sidebar.number_input("Pitch Diameter [mm]", value=60.0) / 1000  # Convert to m
+d = st.sidebar.number_input("Ball Diameter [mm]", value=20.0) / 1000   # Convert to m
+beta = np.deg2rad(st.sidebar.slider("Contact Angle [°]", min_value=0, max_value=30, value=0))
+fs = st.sidebar.number_input("Sampling Frequency [Hz]", value=12000)
+duration = st.sidebar.number_input("Signal Duration [s]", value=2.0)
+RPM = st.sidebar.number_input("Shaft Speed [RPM]", value=1800)
+load_variation = st.sidebar.slider("Load Variation Multiplier", 0.0, 1.0, 0.2)
 
-# Select bearing model
-bearing_model = st.sidebar.selectbox("Select Bearing Model", ['Custom', '6000', '6200', '6300'])
+# === Main Page Inputs: Fault Type and Size ===
+st.title("Synthetic Bearing Fault Signal Simulator")
+fault_type = st.selectbox("Select Fault Type", options=['outer', 'inner', 'ball'])
+fault_size_mm = st.number_input("Fault Size [mm]", value=0.5334, min_value=0.1)
+fault_depth = st.number_input("Fault Depth (for visualization only)", value=1.0)
 
-# Masses
-masses = {
-    "pedestal": st.sidebar.number_input("Mass (Pedestal) [kg]", 0.1, 50.0, 12.638),
-    "shaft": st.sidebar.number_input("Mass (Shaft) [kg]", 0.1, 50.0, 6.2638),
-    "sprung": st.sidebar.number_input("Mass (Sprung) [kg]", 0.1, 10.0, 0.5)
-}
+# === Time and Derived Params ===
+Omega = RPM * 2 * np.pi / 60
+t = np.linspace(0, duration, int(fs * duration))
 
-# Stiffness
-stiffness = {
-    "pedestal": st.sidebar.number_input("Stiffness (Pedestal) [N/m]", 1e3, 1e8, 15.1e6),
-    "shaft": st.sidebar.number_input("Stiffness (Shaft) [N/m]", 1e3, 1e8, 7.42e7),
-    "sprung": st.sidebar.number_input("Stiffness (Sprung) [N/m]", 1e3, 1e8, 1e6)
-}
+# === Mapping Functions ===
+def size_to_amplitude(size_mm):
+    min_size, max_size = 0.1778, 1.02
+    min_amp, max_amp = 0.5, 2.0
+    return ((size_mm - min_size) / (max_size - min_size)) * (max_amp - min_amp) + min_amp
 
-# Damping
-damping = {
-    "pedestal": st.sidebar.number_input("Damping (Pedestal) [Ns/m]", min_value=1.0, max_value=1e4, value=2210.7),
-    "shaft": st.sidebar.number_input("Damping (Shaft) [Ns/m]", min_value=1.0, max_value=1e4, value=1376.8),
-    "sprung": st.sidebar.number_input("Damping (Sprung) [Ns/m]", min_value=1.0, max_value=1e4, value=500.0)
-}
+def size_to_spikewidth(size_mm):
+    min_size, max_size = 0.1778, 1.02
+    min_width, max_width = 0.0005, 0.002
+    return ((size_mm - min_size) / (max_size - min_size)) * (max_width - min_width) + min_width
 
-# Sidebar control for noise level
-noise_level = st.sidebar.number_input("Noise Level", 0.0, 1.0, 0.01)
+def bearing_fault_frequencies(n, d, R, beta, RPM):
+    fr = RPM / 60
+    FTF = 0.5 * fr * (1 - (d / R) * np.cos(beta))
+    BPFI = 0.5 * n * fr * (1 + (d / R) * np.cos(beta))
+    BPFO = 0.5 * n * fr * (1 - (d / R) * np.cos(beta))
+    BSF = R / d * fr * (1 - ((d / R * np.cos(beta)) ** 2))
+    return FTF, BPFI, BPFO, BSF
 
-# Simulate with noise
-yo = sol.y[1] + noise_level * np.random.normal(0, 1e-6, len(sol.y[1]))
+FTF, BPFI, BPFO, BSF = bearing_fault_frequencies(n, d, R, beta, RPM)
 
-# Ball contact
-Kb = st.sidebar.number_input("Ball Stiffness Kb [N/m^(3/2)]", 1e6, 1e11, 1.89e10)
-gamma = 1.5
-
-# Time duration for simulation
-t_end = st.sidebar.slider("Simulation Time [s]", 0.1, 1.0, 0.5)
-
-# Sampling Frequency
-fsamp = st.sidebar.number_input("Sampling Frequency [Hz]", 10000, 100000, 50000)
-
-# Bearing geometry options for common bearings
-bearing_geometry_dict = {
-    "6000": {"num_balls": 9, "ball_diameter": 7.94e-3, "bearing_diameter": 39.32e-3, "shaft_speed": 10},
-    "6200": {"num_balls": 10, "ball_diameter": 8.0e-3, "bearing_diameter": 42.0e-3, "shaft_speed": 12},
-    "6300": {"num_balls": 12, "ball_diameter": 8.5e-3, "bearing_diameter": 45.0e-3, "shaft_speed": 15}
-}
-
-if bearing_model == 'Custom':
-    bearing_geometry = {
-        "num_balls": st.sidebar.number_input("Number of Balls", 1, 50, 9),
-        "ball_diameter": st.sidebar.number_input("Ball Diameter [m]", 1e-3, 1e-1, 7.94e-3),
-        "bearing_diameter": st.sidebar.number_input("Bearing Diameter [m]", 1e-3, 1e-1, 39.32e-3),
-        "shaft_speed": st.sidebar.number_input("Shaft Speed [Hz]", 1, 100, 10)
-    }
+if fault_type == 'outer':
+    f_fault = BPFO
+elif fault_type == 'inner':
+    f_fault = BPFI
+elif fault_type == 'ball':
+    f_fault = BSF
 else:
-    bearing_geometry = bearing_geometry_dict[bearing_model]
+    f_fault = BPFO
 
-# Additional parameters derived from the geometry
-bearing_geometry["omega_i"] = 2 * np.pi * bearing_geometry["shaft_speed"]
-bearing_geometry["omega_c"] = bearing_geometry["omega_i"] * (1 - bearing_geometry["ball_diameter"] / bearing_geometry["bearing_diameter"])
-bearing_geometry["clearance"] = 0
-bearing_geometry["g"] = 9.81  # gravity in m/s^2
+st.markdown(f"**BPFO ≈ {BPFO:.2f} Hz | BPFI ≈ {BPFI:.2f} Hz | BSF ≈ {BSF:.2f} Hz | FTF ≈ {FTF:.2f} Hz**")
 
-# ----------------------------
-# MAIN PAGE
-# ----------------------------
-st.title("Bearing Fault Simulation")
+# === Fault Signal Generation ===
+def generate_fault_impulses(fault_freq, fs, duration, fault_size_mm):
+    amplitude = size_to_amplitude(fault_size_mm)
+    spike_width = size_to_spikewidth(fault_size_mm)
+    t = np.linspace(0, duration, int(fs * duration))
+    signal = np.zeros_like(t)
+    period = 1 / fault_freq
+    num_cycles = int(duration / period)
+    spike_samples = int(spike_width * fs)
 
-# Fault settings on the main page
-fault_type = st.selectbox("Select Fault Type", ['Outer Race Fault', 'Inner Race Fault', 'Ball Fault'])
-fault_depth = st.number_input("Fault Depth [mm]", 0.0, 10.0, 0.01)
-fault_width = st.number_input("Fault Width [rad]", 0.0, np.pi, 0.1)
-fault_depth /= 1000
-# ----------------------------
-# FUNCTIONS
-# ----------------------------
+    for i in range(num_cycles):
+        center = int(i * period * fs)
+        if center + spike_samples < len(t):
+            spike_range = np.arange(center - spike_samples//2, center + spike_samples//2)
+            spike_range = spike_range[(spike_range >= 0) & (spike_range < len(t))]
+            spike_time = t[spike_range] - t[center]
+            impulse = amplitude * np.exp(-((spike_time * fs) ** 2) / 2)
+            signal[spike_range] += impulse
+    return signal
 
-def ball_angles(t):
-    return np.array([(2 * np.pi / bearing_geometry["num_balls"]) * j + bearing_geometry["omega_c"] * t for j in range(bearing_geometry["num_balls"])])
+raw_fault_signal = generate_fault_impulses(f_fault, fs, duration, fault_size_mm)
 
-def apply_fault(delta, theta_j, t):
-    if fault_type == 'Outer Race Fault':
-        fault_angle = 0.0
-        if fault_angle < theta_j < fault_angle + fault_width:
-            delta -= fault_depth
-    elif fault_type == 'Inner Race Fault':
-        fault_angle = bearing_geometry["omega_i"] * t
-        if fault_angle < theta_j < fault_angle + fault_width:
-            delta -= fault_depth
-    elif fault_type == 'Ball Fault':
-        beta = theta_j % (2 * np.pi)
-        if 0 < beta < fault_width:
-            delta -= fault_depth
-    return delta
+# === Shaft Modulation and Filtering ===
+shaft_signal = 0.3 * np.sin(2 * np.pi * (RPM / 60) * t)
+modulated_fault_signal = raw_fault_signal * (1 + shaft_signal)
 
-def contact_force(xd, yd, t):
-    theta = ball_angles(t)
-    Fx, Fy = 0.0, 0.0
-    for j in range(bearing_geometry["num_balls"]):
-        tj = theta[j]
-        delta_j = xd * np.cos(tj) + yd * np.sin(tj) - bearing_geometry["clearance"]
-        delta_j = apply_fault(delta_j, tj, t)
-        if delta_j > 0:
-            F = Kb * delta_j**gamma
-            Fx += F * np.cos(tj)
-            Fy += F * np.sin(tj)
-    return Fx, Fy
+def bandpass_filter(data, lowcut, highcut, fs, order=4):
+    nyq = fs / 2
+    b, a = butter(order, [lowcut / nyq, highcut / nyq], btype='band')
+    return lfilter(b, a, data)
 
-def bearing_5dof(t, y):
-    xo, yo, xi, yi, yr, xodot, yodot, xidot, yidot, yrdot = y
-    xd = xi - xo
-    yd = yi - yo
-    Fx, Fy = contact_force(xd, yd, t)
-    xodotdot = (-damping["pedestal"] * xodot - stiffness["pedestal"] * xo + Fx) / masses["pedestal"]
-    yodotdot = (-damping["pedestal"] * yodot - stiffness["pedestal"] * yo - stiffness["sprung"] * (yo - yr) - damping["sprung"] * (yodot - yrdot) + Fy - masses["pedestal"] * bearing_geometry["g"]) / masses["pedestal"]
-    xidotdot = (-damping["shaft"] * xidot - stiffness["shaft"] * xi - Fx) / masses["shaft"]
-    yidotdot = (-damping["shaft"] * yidot - stiffness["shaft"] * yi - Fy - masses["shaft"] * bearing_geometry["g"]) / masses["shaft"]
-    yrdotdot = (-stiffness["sprung"] * (yr - yo) - damping["sprung"] * (yrdot - yodot) - masses["sprung"] * bearing_geometry["g"]) / masses["sprung"]
-    return [xodot, yodot, xidot, yidot, yrdot, xodotdot, yodotdot, xidotdot, yidotdot, yrdotdot]
+filtered_signal = bandpass_filter(modulated_fault_signal, 2000, 5500, fs)
 
-def bandpass_filter(signal, fs, lowcut=1000, highcut=10000):
-    b, a = butter(4, [lowcut/(fs/2), highcut/(fs/2)], btype='band')
-    return filtfilt(b, a, signal)
+# === Add Noise and Load Modulation ===
+load_modulation = 1 + load_variation * np.sin(2 * np.pi * 0.5 * t)
+noise = 0.05 * np.random.randn(len(t))
+vibration_signal = filtered_signal * load_modulation + noise
 
-# ----------------------------
-# SIMULATE
-# ----------------------------
-y0 = [0]*10
-t_eval = np.linspace(0, t_end, int(fsamp * t_end))
-sol = solve_ivp(bearing_5dof, [0, t_end], y0, t_eval=t_eval, method='RK45')
-time = sol.t
-yo = sol.y[1] + noise_level * np.random.normal(0, 1e-6, len(sol.y[1]))
-
-# Envelope and FFT
-analytic_signal = hilbert(yo)
+# === Envelope Detection and FFT ===
+analytic_signal = hilbert(vibration_signal)
 envelope = np.abs(analytic_signal)
-filtered = bandpass_filter(yo, fsamp)
-fft_vals = np.abs(np.fft.rfft(filtered))
-freqs = np.fft.rfftfreq(len(filtered), 1/fsamp)
 
-# ----------------------------
-# PLOT
-# ----------------------------
+N = len(t)
+freqs = np.fft.rfftfreq(N, 1/fs)
+fft_spectrum = np.abs(np.fft.rfft(vibration_signal))
+envelope_spectrum = np.abs(np.fft.rfft(envelope))
 
-# Show signal only after stabilization
-stable_idx = time >= 0.1
+# === Plotting Function ===
+def create_bokeh_plot():
+    p1 = figure(title="Time Domain Vibration Signal", x_axis_label="Time [s]", y_axis_label="Amplitude", height=250)
+    p1.line(t[:2000], vibration_signal[:2000], line_width=1, legend_label="Signal")
+    p1.legend.location = "top_left"
 
-st.subheader("Raw Vibration Signal")
-df_raw = pd.DataFrame({'Time': time[stable_idx], 'Signal': yo[stable_idx]})
-st.line_chart(df_raw.set_index('Time'))
+    p2 = figure(title="FFT Spectrum", x_axis_label="Frequency [Hz]", y_axis_label="Amplitude", height=250)
+    p2.line(freqs, fft_spectrum, line_width=1, legend_label="FFT Spectrum")
+    add_harmonics(p2, f_fault, fs / 2)
 
-st.subheader("Envelope Signal")
-df_env = pd.DataFrame({'Time': time[stable_idx], 'Envelope': envelope[stable_idx]})
-st.line_chart(df_env.set_index('Time'))
+    p3 = figure(title="Envelope Spectrum", x_axis_label="Frequency [Hz]", y_axis_label="Amplitude", height=250)
+    p3.line(freqs, envelope_spectrum, line_width=1, color="green", legend_label="Envelope Spectrum")
+    add_harmonics(p3, f_fault, fs / 2)
 
-st.subheader("FFT Spectrum")
-fig, ax = plt.subplots()
-ax.plot(freqs, fft_vals)
-ax.set_xlim(0, 2000)
-ax.set_xlabel('Frequency [Hz]')
-ax.set_ylabel('Amplitude')
-ax.set_title('FFT of Filtered Signal')
-st.pyplot(fig)
+    return column(p1, p2, p3)
 
-st.success(f"Simulation complete with fault: {fault_type}")
+def add_harmonics(plot, freq, max_freq):
+    h = freq
+    while h < max_freq:
+        vline = Span(location=h, dimension='height', line_color='red', line_dash='dashed', line_width=1)
+        plot.add_layout(vline)
+        h += freq
+
+# === Display ===
+st.bokeh_chart(create_bokeh_plot(), use_container_width=True)
