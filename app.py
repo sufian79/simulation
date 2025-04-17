@@ -111,7 +111,8 @@ envelope_spectrum = np.abs(np.fft.rfft(envelope))
 # === Plotting with Matplotlib ===
 fig, axs = plt.subplots(3, 1, figsize=(15, 10))
 
-axs[0].plot(t[:fs*duration], vibration_signal[:fs*duration], label="Time-domain Signal")
+time_plot = int(fs*duration)
+axs[0].plot(t[:time_plot], vibration_signal[:time_plot], label="Time-domain Signal")
 axs[0].axhline(0, color='black', linewidth=0.5)
 axs[0].set_title(f"{fault_type.capitalize()} Fault Vibration Signal - Fault Size {fault_size_mm} mm")
 axs[0].set_xlabel("Time [s]")
