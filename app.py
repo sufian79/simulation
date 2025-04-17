@@ -38,6 +38,9 @@ damping = {
 Kb = st.sidebar.number_input("Ball Stiffness Kb [N/m^(3/2)]", 1e6, 1e11, 1.89e10)
 gamma = 1.5
 
+# Time duration for simulation
+t_end = st.sidebar.slider("Simulation Time [s]", 0.1, 1.0, 0.5)
+
 # Bearing geometry options for common bearings
 bearing_geometry_dict = {
     "6000": {"num_balls": 9, "ball_diameter": 7.94e-3, "bearing_diameter": 39.32e-3, "shaft_speed": 10},
