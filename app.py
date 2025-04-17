@@ -68,15 +68,19 @@ bearing_geometry["clearance"] = 0
 bearing_geometry["g"] = 9.81  # gravity in m/s^2
 
 # ----------------------------
-# FAULT SELECTION
+# MAIN PAGE
 # ----------------------------
-fault_type = st.sidebar.selectbox("Fault Type", ['None', 'Outer Race Fault', 'Inner Race Fault', 'Ball Fault'])
-fault_depth = st.sidebar.slider("Fault Depth [m]", 0.0, 0.005, 1e-3)
-fault_width = st.sidebar.slider("Fault Width [rad]", 0.0, 0.5, 0.1)
+st.title("Bearing Fault Simulation")
+
+# Fault settings on the main page
+fault_type = st.selectbox("Select Fault Type", ['Outer Race Fault', 'Inner Race Fault', 'Ball Fault'])
+fault_depth = st.number_input("Fault Depth [m]", 0.0, 1.0, 0.01)
+fault_width = st.number_input("Fault Width [rad]", 0.0, np.pi, 0.1)
 
 # ----------------------------
 # FUNCTIONS
 # ----------------------------
+
 def ball_angles(t):
     return np.array([(2 * np.pi / bearing_geometry["num_balls"]) * j + bearing_geometry["omega_c"] * t for j in range(bearing_geometry["num_balls"])])
 
@@ -131,7 +135,7 @@ y0 = [0]*10
 t_eval = np.linspace(0, t_end, int(fsamp * t_end))
 sol = solve_ivp(bearing_5dof, [0, t_end], y0, t_eval=t_eval, method='RK45')
 time = sol.t
-yo = sol.y[1] + 0.05 * np.random.normal(0, 1e-6, len(sol.y[1]))  # Added noise
+yo = sol.y[1] + noise_level * np.random.normal(0, 1e-6, len(sol.y[1]))
 
 # Envelope and FFT
 analytic_signal = hilbert(yo)
@@ -143,7 +147,6 @@ freqs = np.fft.rfftfreq(len(filtered), 1/fsamp)
 # ----------------------------
 # PLOT
 # ----------------------------
-st.title("Bearing Fault Simulation")
 
 # Show signal only after stabilization
 stable_idx = time >= 0.1
