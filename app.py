@@ -41,6 +41,9 @@ gamma = 1.5
 # Time duration for simulation
 t_end = st.sidebar.slider("Simulation Time [s]", 0.1, 1.0, 0.5)
 
+# Sampling Frequency
+fsamp = st.sidebar.number_input("Sampling Frequency [Hz]", 10000, 100000, 50000)
+
 # Bearing geometry options for common bearings
 bearing_geometry_dict = {
     "6000": {"num_balls": 9, "ball_diameter": 7.94e-3, "bearing_diameter": 39.32e-3, "shaft_speed": 10},
