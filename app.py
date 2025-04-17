@@ -68,6 +68,13 @@ bearing_geometry["clearance"] = 0
 bearing_geometry["g"] = 9.81  # gravity in m/s^2
 
 # ----------------------------
+# FAULT SELECTION
+# ----------------------------
+fault_type = st.sidebar.selectbox("Fault Type", ['None', 'Outer Race Fault', 'Inner Race Fault', 'Ball Fault'])
+fault_depth = st.sidebar.slider("Fault Depth [m]", 0.0, 0.005, 1e-3)
+fault_width = st.sidebar.slider("Fault Width [rad]", 0.0, 0.5, 0.1)
+
+# ----------------------------
 # FUNCTIONS
 # ----------------------------
 def ball_angles(t):
@@ -124,7 +131,7 @@ y0 = [0]*10
 t_eval = np.linspace(0, t_end, int(fsamp * t_end))
 sol = solve_ivp(bearing_5dof, [0, t_end], y0, t_eval=t_eval, method='RK45')
 time = sol.t
-yo = sol.y[1] + noise_level * np.random.normal(0, 1e-6, len(sol.y[1]))
+yo = sol.y[1] + 0.05 * np.random.normal(0, 1e-6, len(sol.y[1]))  # Added noise
 
 # Envelope and FFT
 analytic_signal = hilbert(yo)
