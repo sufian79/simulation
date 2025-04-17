@@ -115,14 +115,28 @@ freqs = np.fft.rfftfreq(len(filtered), 1/fsamp)
 # ----------------------------
 # PLOT
 # ----------------------------
-st.subheader("Raw Vibration Signal (Outer Race Displacement)")
 import pandas as pd
 
-df_raw = pd.DataFrame({'Time': time, 'Signal': yo})
+st.subheader("Raw Vibration Signal (Outer Race Displacement)")
+
+# Only keep samples after 0.1s
+stable_idx = time >= 0.1
+
+# For raw signal
+df_raw = pd.DataFrame({
+    'Time': time[stable_idx],
+    'Signal': yo[stable_idx]
+})
 st.line_chart(df_raw.set_index('Time'))
 
+# For envelope
 st.subheader("Envelope of Vibration Signal")
-st.line_chart(y=envelope, x=time)
+
+df_env = pd.DataFrame({
+    'Time': time[stable_idx],
+    'Envelope': envelope[stable_idx]
+})
+st.line_chart(df_env.set_index('Time'))
 
 st.subheader("FFT of Filtered Signal (Frequency Domain)")
 fig, ax = plt.subplots()
