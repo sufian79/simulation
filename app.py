@@ -116,7 +116,10 @@ freqs = np.fft.rfftfreq(len(filtered), 1/fsamp)
 # PLOT
 # ----------------------------
 st.subheader("Raw Vibration Signal (Outer Race Displacement)")
-st.line_chart(y=yo, x=time)
+import pandas as pd
+
+df_raw = pd.DataFrame({'Time': time, 'Signal': yo})
+st.line_chart(df_raw.set_index('Time'))
 
 st.subheader("Envelope of Vibration Signal")
 st.line_chart(y=envelope, x=time)
