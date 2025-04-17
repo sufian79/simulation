@@ -80,9 +80,9 @@ st.title("Bearing Fault Simulation")
 
 # Fault settings on the main page
 fault_type = st.selectbox("Select Fault Type", ['Outer Race Fault', 'Inner Race Fault', 'Ball Fault'])
-fault_depth = st.number_input("Fault Depth [m]", 0.0, 1.0, 0.01)
+fault_depth = st.number_input("Fault Depth [mm]", 0.0, 10.0, 0.01)
 fault_width = st.number_input("Fault Width [rad]", 0.0, np.pi, 0.1)
-
+fault_depth /= 1000
 # ----------------------------
 # FUNCTIONS
 # ----------------------------
