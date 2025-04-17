@@ -1,9 +1,7 @@
 import streamlit as st
 import numpy as np
 from scipy.signal import butter, lfilter, hilbert
-from bokeh.plotting import figure
-from bokeh.layouts import column
-from bokeh.models import Span
+import matplotlib.pyplot as plt
 
 # === Sidebar Inputs: Bearing Geometry Parameters ===
 st.sidebar.header("Bearing Geometry Parameters")
@@ -106,27 +104,37 @@ fft_spectrum = np.abs(np.fft.rfft(vibration_signal))
 envelope_spectrum = np.abs(np.fft.rfft(envelope))
 
 # === Plotting Function ===
-def create_bokeh_plot():
-    p1 = figure(title="Time Domain Vibration Signal", x_axis_label="Time [s]", y_axis_label="Amplitude", height=250)
-    p1.line(t[:2000], vibration_signal[:2000], line_width=1, legend_label="Signal")
-    p1.legend.location = "top_left"
+fig, axs = plt.subplots(3, 1, figsize=(15, 10))
 
-    p2 = figure(title="FFT Spectrum", x_axis_label="Frequency [Hz]", y_axis_label="Amplitude", height=250)
-    p2.line(freqs, fft_spectrum, line_width=1, legend_label="FFT Spectrum")
-    add_harmonics(p2, f_fault, fs / 2)
+axs[0].plot(t[:2000], vibration_signal[:2000], label="Time-domain Signal")
+axs[0].axhline(0, color='black', linewidth=0.5)
+axs[0].set_title(f"{fault_type.capitalize()} Fault Vibration Signal (Time Domain) - Fault Size {fault_size_mm} mm")
+axs[0].set_xlabel("Time [s]")
+axs[0].set_ylabel("Amplitude")
+axs[0].grid(True)
+axs[0].legend()
 
-    p3 = figure(title="Envelope Spectrum", x_axis_label="Frequency [Hz]", y_axis_label="Amplitude", height=250)
-    p3.line(freqs, envelope_spectrum, line_width=1, color="green", legend_label="Envelope Spectrum")
-    add_harmonics(p3, f_fault, fs / 2)
-
-    return column(p1, p2, p3)
-
-def add_harmonics(plot, freq, max_freq):
+def plot_fault_harmonics_matplotlib(ax, freq, max_freq):
     h = freq
     while h < max_freq:
-        vline = Span(location=h, dimension='height', line_color='red', line_dash='dashed', line_width=1)
-        plot.add_layout(vline)
+        ax.axvline(h, color='red', linestyle='--', linewidth=1)
         h += freq
 
-# === Display ===
-st.bokeh_chart(create_bokeh_plot(), use_container_width=True)
+axs[1].plot(freqs, fft_spectrum, label="FFT Spectrum")
+plot_fault_harmonics_matplotlib(axs[1], f_fault, fs / 2)
+axs[1].set_title("Frequency Spectrum")
+axs[1].set_xlabel("Frequency [Hz]")
+axs[1].set_ylabel("Amplitude")
+axs[1].grid(True)
+axs[1].legend()
+
+axs[2].plot(freqs, envelope_spectrum, color='green', label="Envelope Spectrum")
+plot_fault_harmonics_matplotlib(axs[2], f_fault, fs / 2)
+axs[2].set_title("Envelope Spectrum")
+axs[2].set_xlabel("Frequency [Hz]")
+axs[2].set_ylabel("Amplitude")
+axs[2].grid(True)
+axs[2].legend()
+
+fig.tight_layout()
+st.pyplot(fig)
