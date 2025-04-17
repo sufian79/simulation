@@ -34,6 +34,12 @@ damping = {
     "sprung": st.sidebar.number_input("Damping (Sprung) [Ns/m]", min_value=1.0, max_value=1e4, value=500.0)
 }
 
+# Sidebar control for noise level
+noise_level = st.sidebar.number_input("Noise Level", 0.0, 1.0, 0.01)
+
+# Simulate with noise
+yo = sol.y[1] + noise_level * np.random.normal(0, 1e-6, len(sol.y[1]))
+
 # Ball contact
 Kb = st.sidebar.number_input("Ball Stiffness Kb [N/m^(3/2)]", 1e6, 1e11, 1.89e10)
 gamma = 1.5
