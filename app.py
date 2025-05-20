@@ -9,7 +9,7 @@ from io import BytesIO
 # Multi-DOF bearing vibration simulator using solve_ivp
 def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.05):
     """
-    Simulate a fully coupled 5-DOF MDOF bearing system using solve_ivp.
+    Realistic 5-DOF MDOF bearing vibration simulator using solve_ivp.
 
     Parameters:
         t : np.ndarray
@@ -25,30 +25,60 @@ def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
 
     Returns:
         signal_noisy : np.ndarray
-            Noisy vibration signal (sum of all DOFs)
+            Noisy vibration signal (summed across DOFs)
     """
-    m, c, k = params['m'], params['c'], params['k']
     n_dof = 5
+    m = params.get('m', 1.0)       # base mass per DOF
+    c = params.get('c', 0.05)      # base damping per DOF
+    k = params.get('k', 1000.0)    # base stiffness per DOF
     Fs = params['Fs']
 
-    # Mass, damping, stiffness matrices (diagonal or weakly coupled)
-    M = np.eye(n_dof) * m
-    K = np.diag([k] * n_dof) + np.diag([-0.1 * k] * (n_dof - 1), k=1) + np.diag([-0.1 * k] * (n_dof - 1), k=-1)
-    C = np.eye(n_dof) * c + np.diag([0.05 * c] * (n_dof - 1), k=1) + np.diag([0.05 * c] * (n_dof - 1), k=-1)
+    # Assign physical meaning to each DOF
+    # DOF 0: Shaft
+    # DOF 1: Inner Race
+    # DOF 2: Rolling Element
+    # DOF 3: Outer Race
+    # DOF 4: Bearing Housing
 
-    # Fault forcing frequency
+    # Mass matrix (in kg)
+    M = np.diag([m, 0.8*m, 0.3*m, 0.9*m, 1.2*m])
+
+    # Stiffness matrix (N/m)
+    K = np.array([
+        [2*k,   -k,     0,     0,     0],
+        [-k,  2.5*k,   -k,     0,     0],
+        [0,    -k,    2*k,   -k,     0],
+        [0,     0,    -k,   2.2*k,  -k],
+        [0,     0,     0,   -k,   2*k]
+    ])
+
+    # Damping matrix (Ns/m)
+    C = np.array([
+        [2*c,   -c,     0,     0,     0],
+        [-c,  2.5*c,   -c,     0,     0],
+        [0,    -c,    2*c,   -c,     0],
+        [0,     0,    -c,   2.2*c,  -c],
+        [0,     0,     0,   -c,   2*c]
+    ])
+
+    # Fault excitation frequency
     fault_freq_map = {"outer": BPFO, "inner": BPFI, "ball": BSF}
     f_fault = fault_freq_map.get(fault_type, BPFO)
     wf = 2 * np.pi * f_fault
+    amp = fault_size_mm * 10  # Fault size scaled to force
 
-    amp = (fault_size_mm / 1.0) * 1.0  # scale amplitude
-
+    # Define external force vector
     def F_func(t_local):
-        f = np.zeros(n_dof)
-        f[0] = amp * np.sin(wf * t_local)  # excitation on DOF 0
-        return f
+        F = np.zeros(n_dof)
+        if fault_type == "outer":
+            F[3] = amp * np.sin(wf * t_local)  # outer race
+        elif fault_type == "inner":
+            F[1] = amp * np.sin(wf * t_local)  # inner race
+        elif fault_type == "ball":
+            F[2] = amp * np.sin(wf * t_local)  # ball element
+        return F
 
-    # Define system of ODEs: y = [x0,...x4, v0,...v4]
+    # ODE definition
     def ode(t_local, y):
         x = y[:n_dof]
         v = y[n_dof:]
@@ -58,11 +88,11 @@ def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
     y0 = np.zeros(2 * n_dof)
     sol = solve_ivp(ode, (t[0], t[-1]), y0, t_eval=t, method='RK45')
 
-    # Sum all DOF responses to simulate observed vibration
+    # DOF responses
     x_all = sol.y[:n_dof, :]
     signal = np.sum(x_all, axis=0)
 
-    # Add noise
+    # Add Gaussian noise
     signal_noisy = signal + noise_level * np.random.randn(len(signal))
     return signal_noisy
 
@@ -94,6 +124,11 @@ show_harmonics = st.sidebar.checkbox("Mark Harmonics on Spectrum", True)
 st.sidebar.header("Simulation Options")
 use_5dof = st.sidebar.checkbox("Use 5-DOF Physical Simulation", True)
 
+st.sidebar.header("System Parameters (5-DOF)")
+m = st.sidebar.number_input("Mass per DOF (m) [kg]", value=1.0)
+c = st.sidebar.number_input("Damping Coefficient (c) [Ns/m]", value=0.05)
+k = st.sidebar.number_input("Stiffness (k) [N/m]", value=1000.0)
+
 # Time vector
 t = np.linspace(0, duration, int(fs * duration))
 
@@ -104,11 +139,11 @@ beta = np.deg2rad(beta_deg)
 Omega = RPM * 2 * np.pi / 60  # rad/s
 
 params = {
-    'm': 1.0,    # mass in kg (assumed)
-    'c': 0.05,   # damping coefficient (assumed)
-    'k': 1000.0, # stiffness (assumed)
+    'm': m,    # mass in kg (assumed)
+    'c': c,   # damping coefficient Ns/m (assumed)
+    'k': k, # stiffness N/m (assumed)
     'Omega': Omega,
-    'Fs': fs
+    'Fs': fs     # Hz
 }
 
 # === Bearing Frequencies ===
