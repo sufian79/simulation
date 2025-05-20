@@ -127,7 +127,7 @@ c = st.sidebar.number_input("Damping Coefficient (c) [Ns/m]", value=0.05)
 k = st.sidebar.number_input("Stiffness (k) [N/m]", value=1000.0)
 
 # === Streamlit UI ===
-st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model" + " with 5-DOF Model" if use_5dof else "")
+st.title("Bearing Fault Vibration Signal Simulator" + (" with 5-DOF Model" if use_5dof else "") )
 
 # Time vector
 t = np.linspace(0, duration, int(fs * duration))
