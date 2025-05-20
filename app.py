@@ -96,9 +96,6 @@ def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
     signal_noisy = signal + noise_level * np.random.randn(len(signal))
     return signal_noisy
 
-# === Streamlit UI ===
-st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model" + (" with 5-DOF Model" if use_5dof else ""))
-
 # Sidebar inputs
 st.sidebar.header("Bearing Geometry Parameters")
 n = st.sidebar.number_input("Number of Rolling Elements (n)", value=7)
@@ -128,6 +125,9 @@ st.sidebar.header("System Parameters (5-DOF)")
 m = st.sidebar.number_input("Mass per DOF (m) [kg]", value=1.0)
 c = st.sidebar.number_input("Damping Coefficient (c) [Ns/m]", value=0.05)
 k = st.sidebar.number_input("Stiffness (k) [N/m]", value=1000.0)
+
+# === Streamlit UI ===
+st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model" + " with 5-DOF Model" if use_5dof else "")
 
 # Time vector
 t = np.linspace(0, duration, int(fs * duration))
