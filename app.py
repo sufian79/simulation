@@ -2,73 +2,68 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
-from scipy.signal import hilbert
+from scipy.signal import butter, lfilter, hilbert
 import pandas as pd
+from io import BytesIO
 
-# 5-DOF bearing vibration simulator using solve_ivp
-def simulate_5dof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.05):
+# Multi-DOF bearing vibration simulator using solve_ivp
+def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.05):
     """
-    Simulate vibration signal from a 5-DOF bearing model with fault size and noise using solve_ivp.
+    Simulate a fully coupled 5-DOF MDOF bearing system using solve_ivp.
 
-    params: dict with keys - m, c, k, Omega, Fs
-    fault_size_mm: float, fault size to scale excitation amplitude
-    fault_type: str in ['outer', 'inner', 'ball']
-    noise_level: float, noise amplitude
+    Parameters:
+        t : np.ndarray
+            Time vector
+        params : dict
+            Dictionary with 'm', 'c', 'k', 'Omega', 'Fs'
+        fault_size_mm : float
+            Fault size (mm)
+        fault_type : str
+            One of ['outer', 'inner', 'ball']
+        noise_level : float
+            Noise amplitude
 
-    Returns: vibration signal array (same length as t)
+    Returns:
+        signal_noisy : np.ndarray
+            Noisy vibration signal (sum of all DOFs)
     """
-    m = params['m']
-    c = params['c']
-    k = params['k']
-    Omega = params['Omega']  # shaft rotational speed in rad/s
+    m, c, k = params['m'], params['c'], params['k']
+    n_dof = 5
     Fs = params['Fs']
 
-    n = len(t)
-    dt = 1 / Fs
+    # Mass, damping, stiffness matrices (diagonal or weakly coupled)
+    M = np.eye(n_dof) * m
+    K = np.diag([k] * n_dof) + np.diag([-0.1 * k] * (n_dof - 1), k=1) + np.diag([-0.1 * k] * (n_dof - 1), k=-1)
+    C = np.eye(n_dof) * c + np.diag([0.05 * c] * (n_dof - 1), k=1) + np.diag([0.05 * c] * (n_dof - 1), k=-1)
 
-    # Fault excitation frequency depending on fault type
-    fault_freq_map = {
-        'outer': 100,   # example freq in Hz for outer race fault
-        'inner': 120,   # example freq for inner race fault
-        'ball': 90      # example freq for ball fault
-    }
-    fault_freq = fault_freq_map.get(fault_type, 100)
-    wf = 2 * np.pi * fault_freq  # radians/sec
+    # Fault forcing frequency
+    fault_freq_map = {'outer': 100, 'inner': 120, 'ball': 90}
+    f_fault = fault_freq_map.get(fault_type, 100)
+    wf = 2 * np.pi * f_fault
 
-    # Fault amplitude proportional to fault size
-    amp = (fault_size_mm / 1.0) * 1.0  # scale factor
+    amp = (fault_size_mm / 1.0) * 1.0  # scale amplitude
 
-    # Define forcing function at time t
-    def F_func(t):
-        return amp * np.sin(wf * t)
+    def F_func(t_local):
+        f = np.zeros(n_dof)
+        f[0] = amp * np.sin(wf * t_local)  # excitation on DOF 0
+        return f
 
-    # ODE system for one DOF: y = [x, v]
-    def bearing_ode(t, y):
-        x, v = y
-        F = F_func(t)
-        dxdt = v
-        dvdt = (F - c * v - k * x) / m
-        return [dxdt, dvdt]
+    # Define system of ODEs: y = [x0,...x4, v0,...v4]
+    def ode(t_local, y):
+        x = y[:n_dof]
+        v = y[n_dof:]
+        a = np.linalg.solve(M, F_func(t_local) - C @ v - K @ x)
+        return np.concatenate((v, a))
 
-    # Solve for DOF 0 using solve_ivp
-    y0 = [0, 0]  # initial displacement and velocity
-    sol = solve_ivp(bearing_ode, (t[0], t[-1]), y0, t_eval=t, method='RK45')
+    y0 = np.zeros(2 * n_dof)
+    sol = solve_ivp(ode, (t[0], t[-1]), y0, t_eval=t, method='RK45')
 
-    x0 = sol.y[0]  # displacement for DOF 0
+    # Sum all DOF responses to simulate observed vibration
+    x_all = sol.y[:n_dof, :]
+    signal = np.sum(x_all, axis=0)
 
-    # For other DOFs, add small coupled vibrations (sine + noise)
-    x_others = np.zeros((4, n))
-    for dof in range(1, 5):
-        freq = fault_freq / (dof + 1)
-        x_others[dof - 1, :] = 0.1 * np.sin(2 * np.pi * freq * t) + 0.02 * np.random.randn(n)
-
-    # Sum all DOFs
-    signal = x0 + np.sum(x_others, axis=0)
-
-    # Add Gaussian noise
-    noise = noise_level * np.random.randn(n)
-    signal_noisy = signal + noise
-
+    # Add noise
+    signal_noisy = signal + noise_level * np.random.randn(len(signal))
     return signal_noisy
 
 # === Streamlit UI ===
@@ -85,10 +80,14 @@ duration = st.sidebar.number_input("Signal Duration [s]", value=2.0)
 RPM = st.sidebar.number_input("Shaft Speed (RPM)", value=1800)
 load_variation = st.sidebar.slider("Load-Induced Modulation", 0.0, 1.0, 0.2)
 
-st.sidebar.header("Fault Parameters")
+# === Fault Selection ===
 fault_types = st.sidebar.multiselect("Select Fault Types", ["outer", "inner", "ball"], default=["outer"])
-fault_size_mm = st.sidebar.number_input("Fault Size [mm]", value=0.5334, min_value=0.01)
-noise_level = st.sidebar.slider("Noise Level", 0.0, 0.5, 0.05)
+fault_size_mm = st.sidebar.number_input("Fault Size [mm]", value=0.5334)
+fault_depth = st.sidebar.slider("Fault Depth (for future use)", 0.0, 1.0, 0.5)
+
+# === Visualization Options ===
+show_envelope = st.sidebar.checkbox("Show Envelope Spectrum", True)
+show_harmonics = st.sidebar.checkbox("Mark Harmonics on Spectrum", True)
 
 st.sidebar.header("Simulation Options")
 use_5dof = st.sidebar.checkbox("Use 5-DOF Physical Simulation", True)
@@ -114,44 +113,75 @@ params = {
 if use_5dof:
     vibration_signal = np.zeros_like(t)
     for ft in fault_types:
-        sig = simulate_5dof_vibration(t, params, fault_size_mm, ft, noise_level=noise_level)
+        sig = simulate_mdof_vibration(t, params, fault_size_mm, ft, noise_level=noise_level)
         vibration_signal += sig
 else:
-    # Impulse-based simplified model
+    # === Fault Size Mapping ===
     def size_to_amplitude(size_mm):
         min_size, max_size = 0.1778, 1.02
         min_amp, max_amp = 0.5, 2.0
         return ((size_mm - min_size) / (max_size - min_size)) * (max_amp - min_amp) + min_amp
-
+    
     def size_to_spikewidth(size_mm):
         min_size, max_size = 0.1778, 1.02
         min_width, max_width = 0.0005, 0.002
         return ((size_mm - min_size) / (max_size - min_size)) * (max_width - min_width) + min_width
-
-    fault_freq_map = {"outer": 100, "inner": 120, "ball": 90}
+    
+    # === Bearing Frequencies ===
+    def bearing_fault_frequencies(n, d, R, beta, RPM):
+        fr = RPM / 60
+        FTF = 0.5 * fr * (1 - (d / R) * np.cos(beta))
+        BPFI = 0.5 * n * fr * (1 + (d / R) * np.cos(beta))
+        BPFO = 0.5 * n * fr * (1 - (d / R) * np.cos(beta))
+        BSF = R / d * fr * (1 - ((d / R * np.cos(beta)) ** 2))
+        return FTF, BPFI, BPFO, BSF
+    
+    FTF, BPFI, BPFO, BSF = bearing_fault_frequencies(n, d, R, beta, RPM)
+    
+    st.write(f"**BPFO**: {BPFO:.2f} Hz | **BPFI**: {BPFI:.2f} Hz | **BSF**: {BSF:.2f} Hz | **FTF**: {FTF:.2f} Hz")
+    
+    # === Generate Impulses ===
     def generate_fault_impulses(fault_freq, fs, duration, fault_size_mm):
         amplitude = size_to_amplitude(fault_size_mm)
         spike_width = size_to_spikewidth(fault_size_mm)
-        t_local = np.linspace(0, duration, int(fs * duration))
-        signal = np.zeros_like(t_local)
+        t = np.linspace(0, duration, int(fs * duration))
+        signal = np.zeros_like(t)
         period = 1 / fault_freq
         num_cycles = int(duration / period)
         spike_samples = int(spike_width * fs)
+    
         for i in range(num_cycles):
             center = int(i * period * fs)
-            if center + spike_samples < len(t_local):
+            if center + spike_samples < len(t):
                 spike_range = np.arange(center - spike_samples // 2, center + spike_samples // 2)
-                spike_range = spike_range[(spike_range >= 0) & (spike_range < len(t_local))]
-                spike_time = t_local[spike_range] - t_local[center]
+                spike_range = spike_range[(spike_range >= 0) & (spike_range < len(t))]
+                spike_time = t[spike_range] - t[center]
                 impulse = amplitude * np.exp(-((spike_time * fs) ** 2) / 2)
                 signal[spike_range] += impulse
         return signal
     
-    vibration_signal = np.zeros_like(t)
-    for ft in fault_types:
-        vibration_signal += generate_fault_impulses(fault_freq_map[ft], fs, duration, fault_size_mm)
+    # === Composite Fault Signal ===
+    fault_freq_map = {"outer": BPFO, "inner": BPFI, "ball": BSF}
+    raw_fault_signal = np.zeros_like(t)
     
-    vibration_signal += noise_level * np.random.randn(len(t))
+    for ft in fault_types:
+        raw_fault_signal += generate_fault_impulses(fault_freq_map[ft], fs, duration, fault_size_mm)
+    
+    shaft_signal = 0.3 * np.sin(2 * np.pi * (RPM / 60) * t)
+    modulated_fault_signal = raw_fault_signal * (1 + shaft_signal)
+    
+    # === Bandpass Filter ===
+    def bandpass_filter(data, lowcut, highcut, fs, order=4):
+        nyq = fs / 2
+        b, a = butter(order, [lowcut / nyq, highcut / nyq], btype='band')
+        return lfilter(b, a, data)
+    
+    filtered_signal = bandpass_filter(modulated_fault_signal, 2000, 5500, fs)
+    
+    # === Add Noise and Modulation ===
+    load_modulation = 1 + load_variation * np.sin(2 * np.pi * 0.5 * t)
+    noise = 0.05 * np.random.randn(len(t))
+    vibration_signal = filtered_signal * load_modulation + noise
 
 # === Envelope detection and FFT ===
 analytic_signal = hilbert(vibration_signal)
@@ -163,30 +193,53 @@ fft_spectrum = np.abs(np.fft.rfft(vibration_signal))
 envelope_spectrum = np.abs(np.fft.rfft(envelope))
 
 # === Plotting ===
-fig, axs = plt.subplots(3, 1, figsize=(15, 12))
+fig, axs = plt.subplots(3 if show_envelope else 2, 1, figsize=(15, 10))
 
-axs[0].plot(t, vibration_signal)
-axs[0].set_title(f"Simulated Vibration Signal (Fault Size: {fault_size_mm} mm)")
+axs[0].plot(t, vibration_signal, label="Time-domain Signal")
+axs[0].set_title(f"Composite Fault Signal - Fault Size {fault_size_mm} mm")
 axs[0].set_xlabel("Time [s]")
 axs[0].set_ylabel("Amplitude")
+axs[0].legend()
 axs[0].grid(True)
 
-axs[1].plot(freqs, fft_spectrum)
+def plot_fault_harmonics(ax, freqs_to_mark, max_freq):
+    for freq in freqs_to_mark:
+        h = freq
+        while h < max_freq:
+            ax.axvline(h, color='red', linestyle='--', linewidth=1)
+            h += freq
+
+axs[1].plot(freqs, fft_spectrum, label="FFT Spectrum")
+if show_harmonics:
+    selected_freqs = [fault_freq_map[ft] for ft in fault_types]
+    plot_fault_harmonics(axs[1], selected_freqs, fs / 2)
 axs[1].set_title("Frequency Spectrum")
 axs[1].set_xlabel("Frequency [Hz]")
 axs[1].set_ylabel("Amplitude")
+axs[1].legend()
 axs[1].grid(True)
 
-axs[2].plot(freqs, envelope_spectrum, color='green')
-axs[2].set_title("Envelope Spectrum")
-axs[2].set_xlabel("Frequency [Hz]")
-axs[2].set_ylabel("Amplitude")
-axs[2].grid(True)
+if show_envelope:
+    axs[2].plot(freqs, envelope_spectrum, color='green', label="Envelope Spectrum")
+    if show_harmonics:
+        plot_fault_harmonics(axs[2], selected_freqs, fs / 2)
+    axs[2].set_title("Envelope Spectrum")
+    axs[2].set_xlabel("Frequency [Hz]")
+    axs[2].set_ylabel("Amplitude")
+    axs[2].legend()
+    axs[2].grid(True)
 
 fig.tight_layout()
 st.pyplot(fig)
 
-# === Download CSV option ===
+# === Download CSV Option ===
 df = pd.DataFrame({'Time': t, 'Signal': vibration_signal})
 csv = df.to_csv(index=False).encode()
 st.download_button("Download Signal CSV", csv, "vibration_signal.csv", "text/csv")
+
+# === Placeholder ML Prediction ===
+if st.button("Predict Fault Type (Mock)"):
+    if fault_types:
+        st.success(f"Predicted: {', '.join([ft.capitalize() for ft in fault_types])} Fault(s)")
+    else:
+        st.warning("No fault type selected for prediction.")
