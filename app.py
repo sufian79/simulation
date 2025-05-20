@@ -1,17 +1,16 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import hilbert
 from scipy.integrate import solve_ivp
+from scipy.signal import hilbert
 import pandas as pd
 
-# 5-DOF bearing vibration simulator function using solve_ivp
+# 5-DOF bearing vibration simulator using solve_ivp
 def simulate_5dof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.05):
     """
-    Simulate vibration signal from a 5-DOF bearing model with fault size and noise
-    using scipy.integrate.solve_ivp.
+    Simulate vibration signal from a 5-DOF bearing model with fault size and noise using solve_ivp.
 
-    params: dict with keys - m, c, k, external_force, Omega, Fs
+    params: dict with keys - m, c, k, Omega, Fs
     fault_size_mm: float, fault size to scale excitation amplitude
     fault_type: str in ['outer', 'inner', 'ball']
     noise_level: float, noise amplitude
@@ -25,6 +24,7 @@ def simulate_5dof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
     Fs = params['Fs']
 
     n = len(t)
+    dt = 1 / Fs
 
     # Fault excitation frequency depending on fault type
     fault_freq_map = {
@@ -33,57 +33,43 @@ def simulate_5dof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
         'ball': 90      # example freq for ball fault
     }
     fault_freq = fault_freq_map.get(fault_type, 100)
-    
-    # Convert fault freq to radians
-    wf = 2 * np.pi * fault_freq
+    wf = 2 * np.pi * fault_freq  # radians/sec
 
     # Fault amplitude proportional to fault size
-    amp = (fault_size_mm / 1.0) * 1.0  # scale factor for demo
+    amp = (fault_size_mm / 1.0) * 1.0  # scale factor
 
-    # The state vector y = [x0, v0, x1, v1, ..., x4, v4]
-    # Each DOF has displacement and velocity => 5 DOFs * 2 = 10 states
-
-    def forcing(t):
-        # Forcing only on DOF 0 as sinusoid at fault freq scaled by amp
+    # Define forcing function at time t
+    def F_func(t):
         return amp * np.sin(wf * t)
 
-    def ode_system(t, y):
-        dydt = np.zeros_like(y)
-        for dof in range(5):
-            x = y[2 * dof]       # displacement
-            v = y[2 * dof + 1]   # velocity
-            
-            if dof == 0:
-                F = forcing(t)
-            else:
-                # small coupled vibration forcing for other DOFs
-                # Use deterministic sinusoid with different freq + small random noise
-                F = 0.1 * np.sin(2 * np.pi * (fault_freq / (dof + 1)) * t)
-            
-            # dx/dt = velocity
-            dydt[2 * dof] = v
-            
-            # dv/dt = acceleration = (F - c*v - k*x) / m
-            dydt[2 * dof + 1] = (F - c * v - k * x) / m
-        
-        return dydt
+    # ODE system for one DOF: y = [x, v]
+    def bearing_ode(t, y):
+        x, v = y
+        F = F_func(t)
+        dxdt = v
+        dvdt = (F - c * v - k * x) / m
+        return [dxdt, dvdt]
 
-    # Initial state: all zeros
-    y0 = np.zeros(10)
+    # Solve for DOF 0 using solve_ivp
+    y0 = [0, 0]  # initial displacement and velocity
+    sol = solve_ivp(bearing_ode, (t[0], t[-1]), y0, t_eval=t, method='RK45')
 
-    # Solve ODE with solve_ivp, use t_eval to get solution at specific times
-    sol = solve_ivp(ode_system, (t[0], t[-1]), y0, t_eval=t, method='RK45')
+    x0 = sol.y[0]  # displacement for DOF 0
 
-    # Sum displacement of all DOFs to form the vibration signal
-    x_all = sol.y[0::2, :]  # select displacements only
-    signal = np.sum(x_all, axis=0)
+    # For other DOFs, add small coupled vibrations (sine + noise)
+    x_others = np.zeros((4, n))
+    for dof in range(1, 5):
+        freq = fault_freq / (dof + 1)
+        x_others[dof - 1, :] = 0.1 * np.sin(2 * np.pi * freq * t) + 0.02 * np.random.randn(n)
+
+    # Sum all DOFs
+    signal = x0 + np.sum(x_others, axis=0)
 
     # Add Gaussian noise
     noise = noise_level * np.random.randn(n)
     signal_noisy = signal + noise
 
     return signal_noisy
-
 
 # === Streamlit UI ===
 st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model (solve_ivp)")
@@ -116,7 +102,6 @@ d = d_mm / 1000
 beta = np.deg2rad(beta_deg)
 Omega = RPM * 2 * np.pi / 60  # rad/s
 
-# Parameters for 5-DOF (simplified)
 params = {
     'm': 1.0,    # mass in kg (assumed)
     'c': 0.05,   # damping coefficient (assumed)
@@ -125,15 +110,14 @@ params = {
     'Fs': fs
 }
 
-# Generate signal either by impulse method or 5-DOF
+# Generate signal either by impulse method or 5-DOF solve_ivp
 if use_5dof:
-    # Sum signals for each selected fault type
     vibration_signal = np.zeros_like(t)
     for ft in fault_types:
         sig = simulate_5dof_vibration(t, params, fault_size_mm, ft, noise_level=noise_level)
         vibration_signal += sig
 else:
-    # Your existing impulse-based simplified model here (for quick comparison)
+    # Impulse-based simplified model
     def size_to_amplitude(size_mm):
         min_size, max_size = 0.1778, 1.02
         min_amp, max_amp = 0.5, 2.0
@@ -167,7 +151,6 @@ else:
     for ft in fault_types:
         vibration_signal += generate_fault_impulses(fault_freq_map[ft], fs, duration, fault_size_mm)
     
-    # Add noise
     vibration_signal += noise_level * np.random.randn(len(t))
 
 # === Envelope detection and FFT ===
@@ -191,4 +174,19 @@ axs[0].grid(True)
 axs[1].plot(freqs, fft_spectrum)
 axs[1].set_title("Frequency Spectrum")
 axs[1].set_xlabel("Frequency [Hz]")
-axs[1].set_ylabel("Amplitude
+axs[1].set_ylabel("Amplitude")
+axs[1].grid(True)
+
+axs[2].plot(freqs, envelope_spectrum, color='green')
+axs[2].set_title("Envelope Spectrum")
+axs[2].set_xlabel("Frequency [Hz]")
+axs[2].set_ylabel("Amplitude")
+axs[2].grid(True)
+
+fig.tight_layout()
+st.pyplot(fig)
+
+# === Download CSV option ===
+df = pd.DataFrame({'Time': t, 'Signal': vibration_signal})
+csv = df.to_csv(index=False).encode()
+st.download_button("Download Signal CSV", csv, "vibration_signal.csv", "text/csv")
