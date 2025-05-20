@@ -72,7 +72,7 @@ def simulate_5dof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
     return signal_noisy
 
 # === Streamlit UI ===
-st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model (solve_ivp)")
+st.title("Bearing Fault Vibration Signal Simulator with 5-DOF Model")
 
 # Sidebar inputs
 st.sidebar.header("Bearing Geometry Parameters")
