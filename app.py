@@ -127,7 +127,7 @@ c = st.sidebar.number_input("Damping Coefficient (c) [Ns/m]", value=0.05)
 k = st.sidebar.number_input("Stiffness (k) [N/m]", value=1000.0)
 
 # === Streamlit UI ===
-st.title("Bearing Fault Vibration Signal Simulator" + (" with 5-DOF Model" if use_5dof else "") )
+st.title("Bearing Fault Vibration Signal Simulator - " + ("Physic-based (5-DOF)" if use_5dof else "Impulse-based") )
 
 # Time vector
 t = np.linspace(0, duration, int(fs * duration))
@@ -273,9 +273,3 @@ df = pd.DataFrame({'Time': t, 'Signal': vibration_signal})
 csv = df.to_csv(index=False).encode()
 st.download_button("Download Signal CSV", csv, "vibration_signal.csv", "text/csv")
 
-# === Placeholder ML Prediction ===
-if st.button("Predict Fault Type (Mock)"):
-    if fault_types:
-        st.success(f"Predicted: {', '.join([ft.capitalize() for ft in fault_types])} Fault(s)")
-    else:
-        st.warning("No fault type selected for prediction.")
