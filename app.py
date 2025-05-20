@@ -37,8 +37,8 @@ def simulate_mdof_vibration(t, params, fault_size_mm, fault_type, noise_level=0.
     C = np.eye(n_dof) * c + np.diag([0.05 * c] * (n_dof - 1), k=1) + np.diag([0.05 * c] * (n_dof - 1), k=-1)
 
     # Fault forcing frequency
-    fault_freq_map = {'outer': 100, 'inner': 120, 'ball': 90}
-    f_fault = fault_freq_map.get(fault_type, 100)
+    fault_freq_map = {"outer": BPFO, "inner": BPFI, "ball": BSF}
+    f_fault = fault_freq_map.get(fault_type, BPFO)
     wf = 2 * np.pi * f_fault
 
     amp = (fault_size_mm / 1.0) * 1.0  # scale amplitude
@@ -111,6 +111,19 @@ params = {
     'Fs': fs
 }
 
+# === Bearing Frequencies ===
+def bearing_fault_frequencies(n, d, R, beta, RPM):
+    fr = RPM / 60
+    FTF = 0.5 * fr * (1 - (d / R) * np.cos(beta))
+    BPFI = 0.5 * n * fr * (1 + (d / R) * np.cos(beta))
+    BPFO = 0.5 * n * fr * (1 - (d / R) * np.cos(beta))
+    BSF = R / d * fr * (1 - ((d / R * np.cos(beta)) ** 2))
+    return FTF, BPFI, BPFO, BSF
+    
+FTF, BPFI, BPFO, BSF = bearing_fault_frequencies(n, d, R, beta, RPM)
+st.write(f"**BPFO**: {BPFO:.2f} Hz | **BPFI**: {BPFI:.2f} Hz | **BSF**: {BSF:.2f} Hz | **FTF**: {FTF:.2f} Hz")
+fault_freq_map = {"outer": BPFO, "inner": BPFI, "ball": BSF}
+
 # Generate signal either by impulse method or 5-DOF solve_ivp
 if use_5dof:
     vibration_signal = np.zeros_like(t)
@@ -128,20 +141,7 @@ else:
         min_size, max_size = 0.1778, 1.02
         min_width, max_width = 0.0005, 0.002
         return ((size_mm - min_size) / (max_size - min_size)) * (max_width - min_width) + min_width
-    
-    # === Bearing Frequencies ===
-    def bearing_fault_frequencies(n, d, R, beta, RPM):
-        fr = RPM / 60
-        FTF = 0.5 * fr * (1 - (d / R) * np.cos(beta))
-        BPFI = 0.5 * n * fr * (1 + (d / R) * np.cos(beta))
-        BPFO = 0.5 * n * fr * (1 - (d / R) * np.cos(beta))
-        BSF = R / d * fr * (1 - ((d / R * np.cos(beta)) ** 2))
-        return FTF, BPFI, BPFO, BSF
-    
-    FTF, BPFI, BPFO, BSF = bearing_fault_frequencies(n, d, R, beta, RPM)
-    
-    st.write(f"**BPFO**: {BPFO:.2f} Hz | **BPFI**: {BPFI:.2f} Hz | **BSF**: {BSF:.2f} Hz | **FTF**: {FTF:.2f} Hz")
-    
+        
     # === Generate Impulses ===
     def generate_fault_impulses(fault_freq, fs, duration, fault_size_mm):
         amplitude = size_to_amplitude(fault_size_mm)
@@ -163,7 +163,6 @@ else:
         return signal
     
     # === Composite Fault Signal ===
-    fault_freq_map = {"outer": BPFO, "inner": BPFI, "ball": BSF}
     raw_fault_signal = np.zeros_like(t)
     
     for ft in fault_types:
