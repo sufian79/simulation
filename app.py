@@ -81,9 +81,11 @@ RPM = st.sidebar.number_input("Shaft Speed (RPM)", value=1800)
 load_variation = st.sidebar.slider("Load-Induced Modulation", 0.0, 1.0, 0.2)
 
 # === Fault Selection ===
+st.sidebar.header("Fault Parameters")
 fault_types = st.sidebar.multiselect("Select Fault Types", ["outer", "inner", "ball"], default=["outer"])
 fault_size_mm = st.sidebar.number_input("Fault Size [mm]", value=0.5334)
 fault_depth = st.sidebar.slider("Fault Depth (for future use)", 0.0, 1.0, 0.5)
+noise_level = st.sidebar.slider("Noise Level", 0.0, 0.5, 0.05)
 
 # === Visualization Options ===
 show_envelope = st.sidebar.checkbox("Show Envelope Spectrum", True)
