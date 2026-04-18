@@ -197,7 +197,7 @@ else:
                 signal[spike_range] += impulse
         return signal
     
-    # === Composite Fault Signal ===
+    # === Simulated Fault Signal ===
     raw_fault_signal = np.zeros_like(t)
     
     for ft in fault_types:
@@ -232,7 +232,7 @@ envelope_spectrum = np.abs(np.fft.rfft(envelope))
 fig, axs = plt.subplots(3 if show_envelope else 2, 1, figsize=(15, 10))
 
 axs[0].plot(t, vibration_signal, label="Time-domain Signal")
-axs[0].set_title(f"Composite Fault Signal - Fault Size {fault_size_mm} mm")
+axs[0].set_title(f"Simulated Fault Signal - Fault Size {fault_size_mm} mm")
 axs[0].set_xlabel("Time [s]")
 axs[0].set_ylabel("Amplitude")
 axs[0].legend()
