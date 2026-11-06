@@ -36,6 +36,9 @@ class Bearing:
 
 CWRU_DE = Bearing("SKF6205-DE", 9, 7.94, 39.04)   # drive end
 CWRU_FE = Bearing("SKF6203-FE", 9, 6.75, 28.50)   # fan end
+# SpectraQuest MFS, Rexnord ER-12K. 8 balls, d/D = 0.25 (5/16 in balls, 1.25 in pitch).
+# Verified against the data: envelope harmonics give BPFO = 3.00x, BPFI = 5.00x shaft speed.
+ER12K = Bearing("Rexnord-ER12K", 8, 7.94, 31.75)
 
 
 # ------------------------------------------------------------------- config
@@ -66,6 +69,24 @@ class SimConfig:
     fault_modes: dict = field(default_factory=dict)    # fault -> modes tuple
     fault_jitter: dict = field(default_factory=dict)   # fault -> jitter
     fault_scatter: dict = field(default_factory=dict)  # fault -> amp scatter
+    env_band: dict = field(default_factory=dict)       # fault -> [lo, hi] demod band (Hz)
+    # ---- realism / non-stationarity (defaults = off, i.e. the original stationary model)
+    amp_drift_std: float = 0.0     # log-std of slow drift of impact amplitude (power preserving)
+    amp_drift_tau: float = 0.5     # correlation time of that drift [s]
+    fault_drift: dict = field(default_factory=dict)    # fault -> drift std
+    case_drift: dict = field(default_factory=dict)     # "outer@0.007" -> drift std
+    bg_burst_rate: float = 0.0     # random background transients per second (any bearing state)
+    bg_burst_amp: float = 0.0      # typical transient amplitude (signal units)
+    bg_burst_sigma: float = 0.5    # log-normal spread of transient amplitudes
+    noise_tail_dof: float = 0.0    # 0 = Gaussian noise, else Student-t degrees of freedom (>2)
+    noise_mod_depth: float = 0.0   # log-std of slow noise-level modulation (power preserving)
+    noise_mod_tau: float = 1.0     # correlation time of that modulation [s]
+    # share of the fault's vibration power carried by NON-impulsive, fault-modulated random
+    # vibration (structure-filtered Gaussian noise, amplitude-modulated at the fault rate)
+    gfrac: float = 0.0
+    fault_gfrac: dict = field(default_factory=dict)
+    case_gfrac: dict = field(default_factory=dict)
+    gauss_kappa: float = 3.0       # sharpness of that modulation (0 = unmodulated)
 
 
 # ---------------------------------------------------------------- simulator
@@ -78,6 +99,29 @@ def impulse_response(cfg: SimConfig):
         wd = wn * np.sqrt(1 - z ** 2)
         h += g * np.exp(-z * wn * t) * np.sin(wd * t)
     return h / np.max(np.abs(h))
+
+
+def _ar1(N, fs, tau, rng):
+    """Unit-variance, slowly varying random process with correlation time tau [s]."""
+    a = float(np.exp(-1.0 / (max(tau, 1e-3) * fs)))
+    return signal.lfilter([np.sqrt(1 - a * a)], [1.0, -a], rng.normal(0, 1, N))
+
+
+def _add_responses(x, T, A, modes, fs, L):
+    """Add A_i * h(t - T_i) (sum of decaying resonance modes, fractional-sample timing)."""
+    tt = np.arange(L) / fs
+    for Ti, Ai in zip(T, A):
+        i0 = int(Ti * fs)
+        frac = Ti - i0 / fs
+        hh = np.zeros(L)
+        m = tt >= frac
+        ts = tt[m] - frac
+        for f, z, g in modes:
+            wn = 2 * np.pi * f
+            wd = wn * np.sqrt(1 - z ** 2)
+            hh[m] += g * np.exp(-z * wn * ts) * np.sin(wd * ts)
+        if i0 + L < x.size:
+            x[i0:i0 + L] += Ai * hh
 
 
 def _event_times(rate, fs, N, jitter, rng, speed_profile):
@@ -102,6 +146,7 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
     Returns (x, meta). x is acceleration-like signal (arb. units).
     """
     rng = np.random.default_rng(seed)
+    rng_x = np.random.default_rng(None if seed is None else [int(seed), 777])
     fs = cfg.fs
     N = int(cfg.duration * fs)
     t = np.arange(N) / fs
@@ -157,33 +202,62 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
             mod = np.ones_like(T)
         A = base * np.clip(mod, 0, None)
         A *= 1 + scat * rng.normal(0, 1, T.size)
-        # random impact sign (not all impacts add in-phase at the sensor)
-        # place impulse responses with fractional-sample timing
-        L = len(h)
-        tt = np.arange(L) / fs
-        for Ti, Ai in zip(T, A):
-            i0 = int(Ti * fs)
-            frac = Ti - i0 / fs
-            hh = np.zeros(L)
-            m = tt >= frac
-            ts = tt[m] - frac
-            for f, z, g in modes:
-                wn = 2 * np.pi * f
-                wd = wn * np.sqrt(1 - z ** 2)
-                hh[m] += g * np.exp(-z * wn * ts) * np.sin(wd * ts)
-            if i0 + L < x.size:
-                x[i0:i0 + L] += Ai * hh / (len(cfg.modes) and 1.0)
+        # slow amplitude drift (non-stationarity); exp(d z - d^2) keeps mean power unchanged
+        dstd = cfg.case_drift.get(ck, cfg.fault_drift.get(fault, cfg.amp_drift_std))
+        if dstd > 0:
+            z = _ar1(N, fs, cfg.amp_drift_tau, rng_x)
+            idx = np.clip((T * fs).astype(int), 0, N - 1)
+            w = np.exp(dstd * z - dstd ** 2)
+            A = A * w[idx] / np.sqrt(np.mean(w ** 2))   # realised power fixed, shape drifts
+        _add_responses(x, T, A, modes, fs, len(h))
+        r = cfg.case_gfrac.get(ck, cfg.fault_gfrac.get(fault, cfg.gfrac))
+        if r > 0:
+            r = min(float(r), 0.995)
+            Pi = x[:N].var()                      # total fault power is preserved by the mix
+            tl = np.arange(len(h)) / fs
+            hm = np.zeros(len(h))
+            for f_, z_, g_ in modes:
+                w_ = 2 * np.pi * f_
+                hm += g_ * np.exp(-z_ * w_ * tl) * np.sin(w_ * np.sqrt(1 - z_ ** 2) * tl)
+            xg = signal.fftconvolve(rng_x.normal(0, 1, N), hm)[:N]
+            step = 2 * np.pi * jit / np.sqrt(max(fs / rate, 1.0))
+            ph = 2 * np.pi * np.cumsum(rate * sp) / fs + np.cumsum(rng_x.normal(0, step, N))
+            env = np.exp(cfg.gauss_kappa * (np.cos(ph) - 1.0))
+            if fault == "inner":
+                env = env * np.clip(1 + cfg.inner_mod_depth * np.cos(2 * np.pi * fr * t), 0, None)
+            elif fault == "ball":
+                env = env * np.clip(1 + cfg.ball_mod_depth * np.cos(2 * np.pi * ff["FTF"] * t), 0, None)
+            xg = xg * env
+            xg *= np.sqrt(Pi / (xg.var() + 1e-30))
+            x[:N] = np.sqrt(1 - r) * x[:N] + np.sqrt(r) * xg
+
+    # random background transients (present in healthy bearings too)
+    if cfg.bg_burst_rate > 0 and cfg.bg_burst_amp > 0:
+        nb = int(rng_x.poisson(cfg.bg_burst_rate * N / fs))
+        if nb:
+            Tb = rng_x.uniform(0, N / fs - 0.01, nb)
+            Ab = (cfg.bg_burst_amp * rng_x.lognormal(0, cfg.bg_burst_sigma, nb)
+                  * rng_x.choice([-1.0, 1.0], nb))
+            _add_responses(x, Tb, Ab, cfg.modes, fs, len(h))
     x = x[:N]
 
     # deterministic shaft-related components
     for k, amp in enumerate(cfg.shaft_harm_amp, start=1):
         x += amp * np.sin(2 * np.pi * k * fr * t + rng.uniform(0, 2 * np.pi))
 
-    # background noise: white + coloured
-    x += rng.normal(0, cfg.noise_std, N)
+    # background noise: white (Gaussian or heavy-tailed) + coloured
+    if cfg.noise_tail_dof and cfg.noise_tail_dof > 2.0:
+        dof = float(cfg.noise_tail_dof)
+        w = rng_x.standard_t(dof, N) / np.sqrt(dof / (dof - 2.0))
+    else:
+        w = rng.normal(0, 1, N)
     bl, al = signal.butter(2, 1500 / (fs / 2))
     cn = signal.lfilter(bl, al, rng.normal(0, 1, N))
-    x += cfg.coloured_noise_std * cn / (cn.std() + 1e-12)
+    noise = cfg.noise_std * w + cfg.coloured_noise_std * cn / (cn.std() + 1e-12)
+    if cfg.noise_mod_depth > 0:   # slow non-stationary noise level
+        zn = _ar1(N, fs, cfg.noise_mod_tau, rng_x)
+        noise = noise * np.exp(cfg.noise_mod_depth * zn - cfg.noise_mod_depth ** 2)
+    x += noise
 
     meta = dict(fault=fault, size_in=size_in, rpm=rpm, fs=fs,
                 load_hp=load_hp, freqs=ff, bearing=bearing.name)

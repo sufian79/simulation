@@ -19,14 +19,18 @@ from scipy import stats
 from bearing_sim import Bearing, SimConfig, envelope_spectrum, simulate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CALIB_PATH = os.path.join(HERE, "calibrated_cwru.json")
+CALIB_FILES = {"cwru": os.path.join(HERE, "calibrated_cwru.json"),
+               "sq": os.path.join(HERE, "calibrated_spectraquest.json")}
+SQ_SEV_IN = {"L": 0.001, "M": 0.002, "H": 0.003}   # severity index/1000 (no physical size known)
 MM_PER_IN = 25.4
 COLORS = {"outer": "tab:red", "inner": "tab:green", "ball": "tab:purple"}
 
 PRESETS = {
-    "CWRU 6205-2RS (drive end)": dict(n=9, D=39.04, d=7.94, beta=0.0, fs=12000, rpm=1797),
-    "CWRU 6203-2RS (fan end)": dict(n=9, D=28.50, d=6.75, beta=0.0, fs=12000, rpm=1797),
-    "Custom": dict(n=7, D=60.0, d=20.0, beta=0.0, fs=12000, rpm=1800),
+    "CWRU 6205-2RS (drive end)": dict(n=9, D=39.04, d=7.94, beta=0.0, fs=12000, rpm=1797, band=(2000, 5000)),
+    "CWRU 6203-2RS (fan end)": dict(n=9, D=28.50, d=6.75, beta=0.0, fs=12000, rpm=1797, band=(2000, 5000)),
+    "SpectraQuest MFS - Rexnord ER-12K": dict(n=8, D=31.75, d=7.94, beta=0.0, fs=25600, rpm=1200,
+                                              band=(9000, 12000)),
+    "Custom": dict(n=7, D=60.0, d=20.0, beta=0.0, fs=12000, rpm=1800, band=(2000, 5000)),
 }
 
 
@@ -44,11 +48,16 @@ def cfg_from_dict(d: dict) -> SimConfig:
     return SimConfig(**d)
 
 
-def load_calibrated():
-    if not os.path.exists(CALIB_PATH):
-        return None
-    with open(CALIB_PATH) as fh:
-        return cfg_from_dict(json.load(fh))
+def load_calibrated(kind):
+    """{label: SimConfig}. CWRU: one config. SpectraQuest: one per accelerometer axis."""
+    path = CALIB_FILES.get(kind)
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path) as fh:
+        d = json.load(fh)
+    if kind == "cwru":
+        return {"": cfg_from_dict(d)}
+    return {k: cfg_from_dict(v) for k, v in d.items() if not k.startswith("_")}
 
 
 def with_size(cfg: SimConfig, fault: str, size_in: float) -> SimConfig:
@@ -59,8 +68,15 @@ def with_size(cfg: SimConfig, fault: str, size_in: float) -> SimConfig:
     if not pts:
         return cfg
     s, a = zip(*pts)
-    amp = float(np.interp(size_in, s, a))
-    return replace(cfg, case_gain={**cfg.case_gain, f"{fault}@{size_in:.3f}": amp})
+    key = f"{fault}@{size_in:.3f}"
+    out = replace(cfg, case_gain={**cfg.case_gain, key: float(np.interp(size_in, s, a))})
+    for fld in ("case_gfrac", "case_drift"):          # same interpolation for the realism values
+        d = getattr(cfg, fld)
+        v = [(sz, d[f"{fault}@{sz:.3f}"]) for sz in s if f"{fault}@{sz:.3f}" in d]
+        if v:
+            sv, vv = zip(*v)
+            out = replace(out, **{fld: {**d, key: float(np.interp(size_in, sv, vv))}})
+    return out
 
 
 def generate(bearing, faults, size_mm, rpm, cfg, load_hp, seed):
@@ -119,8 +135,17 @@ def read_uploaded(file):
     """Return dict name -> 1-D array from a .mat or .csv upload."""
     if file.name.lower().endswith(".mat"):
         m = sio.loadmat(io.BytesIO(file.getvalue()))
-        out = {k: np.squeeze(v).astype(float) for k, v in m.items()
-               if not k.startswith("__") and np.squeeze(v).ndim == 1 and np.squeeze(v).size > 1000}
+        out = {}
+        for k, v in m.items():
+            if k.startswith("__"):
+                continue
+            v = np.squeeze(np.asarray(v, float))
+            if v.ndim == 1 and v.size > 1000:
+                out[k] = v
+            elif v.ndim == 2 and min(v.shape) <= 8 and max(v.shape) > 1000:   # e.g. SpectraQuest (N, 3)
+                v = v if v.shape[0] > v.shape[1] else v.T
+                for a in range(v.shape[1]):
+                    out[f"{k} [axis {a + 1}]"] = v[:, a]
         return out
     df = pd.read_csv(io.BytesIO(file.getvalue()))
     return {c: df[c].to_numpy(float) for c in df.select_dtypes("number").columns}
@@ -134,6 +159,8 @@ st.title("Bearing Fault Vibration Simulator (physics-based, CWRU-calibratable)")
 st.sidebar.header("Bearing geometry")
 preset = st.sidebar.selectbox("Preset", list(PRESETS))
 P = PRESETS[preset]
+is_sq = preset.startswith("SpectraQuest")
+calib_kind = "sq" if is_sq else ("cwru" if preset.startswith("CWRU 6205") else None)
 n_balls = st.sidebar.number_input("Number of rolling elements (n)", min_value=3, max_value=40,
                                   value=P["n"], key=f"n_{preset}")
 D_mm = st.sidebar.number_input("Pitch diameter D [mm]", min_value=1.0, value=P["D"],
@@ -154,20 +181,37 @@ seed = int(st.sidebar.number_input("Random seed", min_value=0, value=0))
 st.sidebar.header("Fault")
 fault_types = st.sidebar.multiselect("Fault types (empty = healthy)", ["outer", "inner", "ball"],
                                      default=["outer"])
-fault_size_mm = st.sidebar.number_input("Fault size [mm]", min_value=0.05, max_value=3.0,
-                                        value=0.5334, step=0.0254, format="%.4f")
-st.sidebar.caption(f"= {fault_size_mm / MM_PER_IN:.4f} in   (CWRU: 0.1778 / 0.3556 / 0.5334 / 0.7112 mm)")
+if is_sq:
+    sev = st.sidebar.selectbox("Severity", ["L", "M", "H"], index=2,
+                               help="Low / medium / high, as in the SpectraQuest file names.")
+    fault_size_mm = SQ_SEV_IN[sev] * MM_PER_IN     # internal severity index, not a real size
+    size_label = f"severity {sev}"
+    st.sidebar.caption("Severity is categorical here: the defect sizes are not recorded in the data.")
+else:
+    fault_size_mm = st.sidebar.number_input("Fault size [mm]", min_value=0.05, max_value=3.0,
+                                            value=0.5334, step=0.0254, format="%.4f")
+    size_label = f"fault size {fault_size_mm} mm"
+    st.sidebar.caption(f"= {fault_size_mm / MM_PER_IN:.4f} in   (CWRU: 0.1778 / 0.3556 / 0.5334 / 0.7112 mm)")
 
 # ----------------------------------------------------- realism / calibration
 st.sidebar.header("Signal realism")
-calib = load_calibrated()
+calib_set = load_calibrated(calib_kind) if calib_kind else {}
+calib = None
 use_calib = False
-if calib is not None:
-    use_calib = st.sidebar.checkbox("Use CWRU-calibrated parameters (calibrated_cwru.json)", False)
+if calib_set:
+    dname = "SpectraQuest" if is_sq else "CWRU"
+    use_calib = st.sidebar.checkbox(f"Use {dname}-calibrated parameters", False)
     if use_calib:
-        st.sidebar.caption("Resonances, noise, slip and per-case amplitudes come from the real CWRU "
-                           "fit (amplitudes in sensor units, interpolated between 0.18/0.36/0.53 mm). "
-                           "Manual noise/resonance settings below are ignored.")
+        label = next(iter(calib_set))
+        if len(calib_set) > 1:
+            label = st.sidebar.selectbox("Accelerometer axis", list(calib_set))
+        calib = calib_set[label]
+        st.sidebar.caption("Resonances, noise, slip and per-case amplitudes come from the real-data fit "
+                           "(sensor units). Manual noise/resonance settings below are ignored. "
+                           + ("Each axis is calibrated independently." if is_sq else
+                              "Amplitudes are interpolated between 0.18/0.36/0.53 mm."))
+elif calib_kind is None and preset != "Custom":
+    st.sidebar.caption("No calibration available for this preset.")
 mod_depth = st.sidebar.slider("Load-zone modulation depth (inner: 1x shaft, ball: cage)", 0.0, 1.0, 0.8)
 noise_std = st.sidebar.slider("White noise std", 0.0, 0.5, 0.05)
 coloured_std = st.sidebar.slider("Coloured (low-frequency) noise std", 0.0, 0.3, 0.03)
@@ -186,10 +230,43 @@ with st.sidebar.expander("Advanced physics"):
         pd.DataFrame(SimConfig().modes, columns=["freq_Hz", "damping", "gain"]),
         num_rows="dynamic", key="modes_editor")
 
+# ------------------------------------------------------------- realism options
+st.sidebar.header("Realism (non-stationarity)")
+realism_on = st.sidebar.checkbox(
+    "Enable realism effects", True,
+    help="Switch everything below off to get the original stationary, perfectly impulsive model.")
+override = False
+if realism_on and use_calib:
+    override = st.sidebar.checkbox(
+        "Override fitted per-case values with the sliders", False,
+        help="Off: use the values fitted to the real recordings (differ per fault and severity).")
+manual = realism_on and (override or not use_calib)
+with st.sidebar.expander("Realism controls", expanded=manual):
+    if realism_on and not manual:
+        st.caption("Using values fitted to the real recordings. Tick the override box above to edit.")
+    st.markdown("**Fault signal**")
+    r_gfrac = st.slider("Non-impulsive share of fault power", 0.0, 0.99, 0.0, 0.05, disabled=not manual,
+                        help="Part of the fault vibration is random (structure-filtered noise) modulated "
+                             "at the fault rate instead of clean impacts. Lowers kurtosis and "
+                             "fault peaks at equal RMS. Real CWRU and SpectraQuest files need this.")
+    r_kappa = st.slider("Sharpness of that modulation", 0.0, 8.0, 3.0, 0.5, disabled=not manual)
+    r_drift = st.slider("Slow amplitude drift (log-std)", 0.0, 1.5, 0.0, 0.1, disabled=not manual,
+                        help="Fault strength wanders over time; produces the file-to-file spread of kurtosis.")
+    r_drift_tau = st.slider("Drift correlation time [s]", 0.05, 5.0, 0.5, 0.05, disabled=not manual)
+    st.markdown("**Background (also in healthy bearings)**")
+    r_burst_rate = st.slider("Random transients [per s]", 0.0, 40.0, 0.0, 1.0, disabled=not manual)
+    r_burst_amp = st.slider("Transient size (x noise RMS)", 0.0, 12.0, 4.0, 0.5, disabled=not manual)
+    r_tail = st.select_slider("Heavy-tailed noise (Student-t dof, 0 = Gaussian)",
+                              options=[0, 3, 4, 5, 6, 8, 12, 30], value=0, disabled=not manual)
+    r_nmod = st.slider("Slow noise-level modulation", 0.0, 1.0, 0.0, 0.1, disabled=not manual)
+    r_nmod_tau = st.slider("Noise modulation time [s]", 0.1, 5.0, 1.0, 0.1, disabled=not manual)
+
 st.sidebar.header("Visualization")
 zoom_ms = st.sidebar.slider("Time-plot window [ms]", 20, 1000, 200)
-lo_def, hi_def = int(fs * 0.1667), int(fs * 0.4167)
-band = st.sidebar.slider("Envelope demodulation band [Hz]", 200, int(fs * 0.48), (lo_def, hi_def))
+lo_def = int(min(P["band"][0], 0.40 * fs))
+hi_def = int(min(P["band"][1], 0.47 * fs))
+band = st.sidebar.slider("Envelope demodulation band [Hz]", 200, int(fs * 0.48), (lo_def, hi_def),
+                         key=f"band_{preset}_{fs}")
 show_harmonics = st.sidebar.checkbox("Mark fault harmonics", True)
 show_envelope = st.sidebar.checkbox("Show envelope spectrum", True)
 
@@ -202,8 +279,9 @@ if d_mm >= D_mm:
 if use_calib:
     cfg = replace(calib, fs=fs, duration=float(duration),
                   inner_mod_depth=mod_depth, ball_mod_depth=mod_depth)
-    if fs != 12000 or not preset.startswith("CWRU 6205"):
-        st.warning("Calibration is valid for CWRU 6205 @ 12 kHz only.")
+    if fs != calib.fs:
+        st.warning(f"This calibration was fitted at fs = {calib.fs} Hz; other rates change the "
+                   "resonance response.")
 else:
     modes = tuple((float(r.freq_Hz), float(r.damping), float(r.gain))
                   for r in modes_df.dropna().itertuples() if 0 < r.freq_Hz < 0.48 * fs)
@@ -215,6 +293,20 @@ else:
                     speed_fluct=speed_fluct, noise_std=noise_std,
                     coloured_noise_std=coloured_std, shaft_harm_amp=(h1, h2, h3),
                     inner_mod_depth=mod_depth, ball_mod_depth=mod_depth)
+    if is_sq:   # severity index 0.001-0.003: reference = L, no entry/exit double impulses
+        cfg = replace(cfg, size_ref_in=0.001, double_impulse_size_in=1e9)
+
+# ------------------------------------------------------ apply realism options
+_zero = dict(gfrac=0.0, fault_gfrac={}, case_gfrac={}, amp_drift_std=0.0, fault_drift={}, case_drift={},
+             bg_burst_rate=0.0, bg_burst_amp=0.0, noise_tail_dof=0.0, noise_mod_depth=0.0)
+if not realism_on:
+    cfg = replace(cfg, **_zero)
+elif manual:
+    noise_rms = float(np.sqrt(cfg.noise_std ** 2 + cfg.coloured_noise_std ** 2))
+    cfg = replace(cfg, **{**_zero, "gfrac": r_gfrac, "amp_drift_std": r_drift,
+                          "bg_burst_rate": r_burst_rate, "bg_burst_amp": r_burst_amp * noise_rms,
+                          "noise_tail_dof": float(r_tail), "noise_mod_depth": r_nmod},
+                  gauss_kappa=r_kappa, amp_drift_tau=r_drift_tau, noise_mod_tau=r_nmod_tau)
 
 # ----------------------------------------------------------- frequencies
 fr = rpm / 60.0
@@ -259,7 +351,7 @@ with tabs[0]:
     if len(comps) > 1:
         for f, xf in comps.items():
             ax.plot(t[:nz], xf[:nz], lw=0.5, alpha=0.6, color=COLORS[f], label=f"{f} component")
-    ax.set(xlabel="Time [s]", ylabel="Amplitude", title=f"Simulated signal - fault size {fault_size_mm} mm")
+    ax.set(xlabel="Time [s]", ylabel="Amplitude", title=f"Simulated signal - {size_label}")
     ax.grid(True); ax.legend(loc="upper right")
     st.pyplot(fig); plt.close(fig)
 
@@ -319,36 +411,42 @@ with tabs[4]:
     c1, c2, c3 = st.columns(3)
     b_faults = c1.multiselect("Classes", ["normal", "outer", "inner", "ball"],
                               default=["normal", "outer", "inner", "ball"])
-    b_sizes = c2.text_input("Fault sizes [mm]", "0.1778, 0.3556, 0.5334")
+    b_sizes = c2.text_input("Severities (L, M, H)" if is_sq else "Fault sizes [mm]",
+                            "L, M, H" if is_sq else "0.1778, 0.3556, 0.5334")
     b_segs = int(c3.number_input("Windows per class/size", min_value=1, value=50))
     b_win = int(c3.number_input("Window length [samples]", min_value=256, value=2048, step=256))
     if st.button("Generate dataset"):
         try:
-            sizes = [float(s) for s in b_sizes.split(",") if s.strip()]
-        except ValueError:
+            if is_sq:   # (label, internal size in mm)
+                sizes = [(s.strip().upper(), SQ_SEV_IN[s.strip().upper()] * MM_PER_IN)
+                         for s in b_sizes.split(",") if s.strip()]
+            else:
+                sizes = [(float(s), float(s)) for s in b_sizes.split(",") if s.strip()]
+        except (ValueError, KeyError):
             sizes = []
             st.error("Could not parse the fault sizes.")
-        combos = [(f, s) for f in b_faults for s in ([0.0] if f == "normal" else sizes)]
+        combos = [(f, s) for f in b_faults for s in ([("-" if is_sq else 0.0, 0.0)] if f == "normal" else sizes)]
         if combos:
             Xs, lab, sz = [], [], []
             bar = st.progress(0.0)
             for i, (f, s) in enumerate(combos):
                 dur = b_segs * b_win / fs
                 cfg_b = replace(cfg, duration=dur)
-                xb, _ = generate(bearing, [] if f == "normal" else [f], s, rpm, cfg_b,
+                xb, _ = generate(bearing, [] if f == "normal" else [f], s[1], rpm, cfg_b,
                                  load_hp, seed + 1000 * (i + 1))
                 Xs.append(xb[: b_segs * b_win].reshape(b_segs, b_win))
                 lab += [f] * b_segs
-                sz += [s] * b_segs
+                sz += [s[0]] * b_segs
                 bar.progress((i + 1) / len(combos))
             buf = io.BytesIO()
+            size_key = "severity" if is_sq else "size_mm"
             np.savez_compressed(buf, X=np.concatenate(Xs).astype(np.float32), fault=np.array(lab),
-                                size_mm=np.array(sz), rpm=rpm, fs=fs)
+                                rpm=rpm, fs=fs, **{size_key: np.array(sz)})
             st.session_state["batch_npz"] = buf.getvalue()
             st.session_state["batch_info"] = f"{len(lab)} windows x {b_win} samples, {len(combos)} class/size combos"
     if "batch_npz" in st.session_state:
         st.success(st.session_state["batch_info"])
-        st.download_button("Download dataset (.npz: X, fault, size_mm, rpm, fs)",
+        st.download_button("Download dataset (.npz: X, fault, size_mm or severity, rpm, fs)",
                            st.session_state["batch_npz"], "bearing_synthetic_dataset.npz")
 
 # ----------------------------------------------------------- downloads
