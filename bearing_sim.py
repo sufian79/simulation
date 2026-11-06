@@ -87,6 +87,38 @@ class SimConfig:
     fault_gfrac: dict = field(default_factory=dict)
     case_gfrac: dict = field(default_factory=dict)
     gauss_kappa: float = 3.0       # sharpness of that modulation (0 = unmodulated)
+    # ---- instrument / background realism (defaults = off -> previous behaviour)
+    bg_shape_f: tuple = ()         # background PSD shape: frequencies [Hz] ...
+    bg_shape_db: tuple = ()        # ... and levels [dB]; replaces the white + coloured noise
+    aa_fc: float = 0.0             # anti-aliasing low-pass edge [Hz] of the recorder (0 = none)
+    aa_order: int = 8
+    bg_lines: tuple = ()           # narrow-band lines (freq Hz, amplitude) present in the healthy recording
+    case_bg: dict = field(default_factory=dict)       # "outer@0.021" -> background level relative to healthy
+    case_jitter: dict = field(default_factory=dict)   # per-case slip
+    case_scatter: dict = field(default_factory=dict)  # per-case impact-amplitude scatter
+    case_kappa: dict = field(default_factory=dict)    # per-case sharpness of the non-impulsive modulation
+    case_mod: dict = field(default_factory=dict)      # per-case load-zone / cage modulation depth (inner, ball)
+    case_drift_tau: dict = field(default_factory=dict)  # per-case correlation time of the amplitude drift [s]
+    case_eq: dict = field(default_factory=dict)       # "outer@0.021" -> (freqs Hz, dB): power-preserving spectral correction
+    case_modes: dict = field(default_factory=dict)    # "outer@0.021" -> resonance modes for that case
+
+
+def config_from_dict(d):
+    """SimConfig from a JSON-loaded dict (lists -> tuples); unknown keys are ignored."""
+    from dataclasses import fields
+    d = dict(d)
+    tup = lambda m: tuple(tuple(x) for x in m)
+    d["modes"] = tup(d["modes"])
+    for k in ("fault_modes", "case_modes"):
+        d[k] = {a: tup(b) for a, b in d.get(k, {}).items()}
+    d["case_eq"] = {a: (tuple(b[0]), tuple(b[1])) for a, b in d.get("case_eq", {}).items()}
+    for k in ("shaft_harm_amp", "bg_shape_f", "bg_shape_db"):
+        if k in d:
+            d[k] = tuple(d[k])
+    if "bg_lines" in d:
+        d["bg_lines"] = tup(d["bg_lines"])
+    known = {f.name for f in fields(SimConfig)}
+    return SimConfig(**{k: v for k, v in d.items() if k in known})
 
 
 # ---------------------------------------------------------------- simulator
@@ -99,6 +131,29 @@ def impulse_response(cfg: SimConfig):
         wd = wn * np.sqrt(1 - z ** 2)
         h += g * np.exp(-z * wn * t) * np.sin(wd * t)
     return h / np.max(np.abs(h))
+
+
+_FIR_CACHE = {}
+_AA_CACHE = {}
+
+
+def _bg_fir(f_hz, db, fs, ntaps=1025):
+    """FIR whose power response follows the given PSD shape; unit-variance white in -> unit PSD-scale out."""
+    key = (tuple(f_hz), tuple(db), fs, ntaps)
+    if key not in _FIR_CACHE:
+        f = np.asarray(f_hz, float)
+        g = 10 ** (np.asarray(db, float) / 20.0)
+        grid = np.linspace(0.0, 1.0, 257)                      # normalised to Nyquist
+        gain = np.interp(grid * fs / 2, f, g)
+        _FIR_CACHE[key] = signal.firwin2(ntaps, grid, gain, window=("kaiser", 8.0))
+    return _FIR_CACHE[key]
+
+
+def _aa_sos(fc, order, fs):
+    key = (fc, order, fs)
+    if key not in _AA_CACHE:
+        _AA_CACHE[key] = signal.ellip(order, 1.0, 80.0, fc / (fs / 2), output="sos")
+    return _AA_CACHE[key]
 
 
 def _ar1(N, fs, tau, rng):
@@ -172,9 +227,10 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
         base = (cfg.a0 * (size_in / cfg.size_ref_in) ** cfg.size_exponent
                 * cfg.fault_gain.get(fault, 1.0))
     base *= (1 + 0.04 * load_hp)
-    modes = cfg.fault_modes.get(fault, cfg.modes)
-    jit = cfg.fault_jitter.get(fault, cfg.jitter)
-    scat = cfg.fault_scatter.get(fault, cfg.ir_amp_scatter)
+    modes = cfg.case_modes.get(ck) or cfg.fault_modes.get(fault, cfg.modes)
+    jit = cfg.case_jitter.get(ck, cfg.fault_jitter.get(fault, cfg.jitter))
+    scat = cfg.case_scatter.get(ck, cfg.fault_scatter.get(fault, cfg.ir_amp_scatter))
+    kap = cfg.case_kappa.get(ck, cfg.gauss_kappa)
 
     if fault != "normal":
         if fault == "outer":
@@ -195,9 +251,9 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
             amp_scale = np.concatenate([np.ones(0)])  # placeholder
         # amplitude modulation
         if fault == "inner":
-            mod = 1 + cfg.inner_mod_depth * np.cos(2 * np.pi * fr * T)
+            mod = 1 + cfg.case_mod.get(ck, cfg.inner_mod_depth) * np.cos(2 * np.pi * fr * T)
         elif fault == "ball":
-            mod = 1 + cfg.ball_mod_depth * np.cos(2 * np.pi * ff["FTF"] * T)
+            mod = 1 + cfg.case_mod.get(ck, cfg.ball_mod_depth) * np.cos(2 * np.pi * ff["FTF"] * T)
         else:
             mod = np.ones_like(T)
         A = base * np.clip(mod, 0, None)
@@ -205,7 +261,7 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
         # slow amplitude drift (non-stationarity); exp(d z - d^2) keeps mean power unchanged
         dstd = cfg.case_drift.get(ck, cfg.fault_drift.get(fault, cfg.amp_drift_std))
         if dstd > 0:
-            z = _ar1(N, fs, cfg.amp_drift_tau, rng_x)
+            z = _ar1(N, fs, cfg.case_drift_tau.get(ck, cfg.amp_drift_tau), rng_x)
             idx = np.clip((T * fs).astype(int), 0, N - 1)
             w = np.exp(dstd * z - dstd ** 2)
             A = A * w[idx] / np.sqrt(np.mean(w ** 2))   # realised power fixed, shape drifts
@@ -222,11 +278,11 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
             xg = signal.fftconvolve(rng_x.normal(0, 1, N), hm)[:N]
             step = 2 * np.pi * jit / np.sqrt(max(fs / rate, 1.0))
             ph = 2 * np.pi * np.cumsum(rate * sp) / fs + np.cumsum(rng_x.normal(0, step, N))
-            env = np.exp(cfg.gauss_kappa * (np.cos(ph) - 1.0))
+            env = np.exp(kap * (np.cos(ph) - 1.0))
             if fault == "inner":
-                env = env * np.clip(1 + cfg.inner_mod_depth * np.cos(2 * np.pi * fr * t), 0, None)
+                env = env * np.clip(1 + cfg.case_mod.get(ck, cfg.inner_mod_depth) * np.cos(2 * np.pi * fr * t), 0, None)
             elif fault == "ball":
-                env = env * np.clip(1 + cfg.ball_mod_depth * np.cos(2 * np.pi * ff["FTF"] * t), 0, None)
+                env = env * np.clip(1 + cfg.case_mod.get(ck, cfg.ball_mod_depth) * np.cos(2 * np.pi * ff["FTF"] * t), 0, None)
             xg = xg * env
             xg *= np.sqrt(Pi / (xg.var() + 1e-30))
             x[:N] = np.sqrt(1 - r) * x[:N] + np.sqrt(r) * xg
@@ -245,19 +301,38 @@ def simulate(bearing: Bearing, fault: str, size_in: float, rpm: float,
     for k, amp in enumerate(cfg.shaft_harm_amp, start=1):
         x += amp * np.sin(2 * np.pi * k * fr * t + rng.uniform(0, 2 * np.pi))
 
+    if cfg.bg_lines and fault == "normal":      # interference lines seen in the real healthy recording
+        for f_, a_ in cfg.bg_lines:
+            x += a_ * np.sin(2 * np.pi * f_ * t + rng_x.uniform(0, 2 * np.pi))
+
     # background noise: white (Gaussian or heavy-tailed) + coloured
     if cfg.noise_tail_dof and cfg.noise_tail_dof > 2.0:
         dof = float(cfg.noise_tail_dof)
         w = rng_x.standard_t(dof, N) / np.sqrt(dof / (dof - 2.0))
     else:
         w = rng.normal(0, 1, N)
-    bl, al = signal.butter(2, 1500 / (fs / 2))
-    cn = signal.lfilter(bl, al, rng.normal(0, 1, N))
-    noise = cfg.noise_std * w + cfg.coloured_noise_std * cn / (cn.std() + 1e-12)
+    if cfg.bg_shape_f:            # PSD-matched background (fitted to the real healthy recording)
+        fir = _bg_fir(cfg.bg_shape_f, cfg.bg_shape_db, fs)
+        y = signal.fftconvolve(w, fir)[len(fir) // 2: len(fir) // 2 + N]
+        noise = np.sqrt(cfg.noise_std ** 2 + cfg.coloured_noise_std ** 2) * y / np.sqrt(np.sum(fir ** 2))
+    else:
+        bl, al = signal.butter(2, 1500 / (fs / 2))
+        cn = signal.lfilter(bl, al, rng.normal(0, 1, N))
+        noise = cfg.noise_std * w + cfg.coloured_noise_std * cn / (cn.std() + 1e-12)
     if cfg.noise_mod_depth > 0:   # slow non-stationary noise level
         zn = _ar1(N, fs, cfg.noise_mod_tau, rng_x)
         noise = noise * np.exp(cfg.noise_mod_depth * zn - cfg.noise_mod_depth ** 2)
+    if fault != "normal":
+        noise = noise * cfg.case_bg.get(ck, 1.0)
     x += noise
+
+    eq = cfg.case_eq.get(ck)
+    if eq:                        # smooth transfer-function correction fitted to the real spectrum
+        fir = _bg_fir(eq[0], eq[1], fs)
+        x = signal.fftconvolve(x, fir)[len(fir) // 2: len(fir) // 2 + N]
+
+    if cfg.aa_fc > 0:             # recorder anti-aliasing filter (steep roll-off near Nyquist)
+        x = signal.sosfilt(_aa_sos(cfg.aa_fc, cfg.aa_order, fs), x)
 
     meta = dict(fault=fault, size_in=size_in, rpm=rpm, fs=fs,
                 load_hp=load_hp, freqs=ff, bearing=bearing.name)

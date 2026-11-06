@@ -16,7 +16,7 @@ import streamlit as st
 from scipy import io as sio
 from scipy import stats
 
-from bearing_sim import Bearing, SimConfig, envelope_spectrum, simulate
+from bearing_sim import Bearing, SimConfig, config_from_dict, envelope_spectrum, simulate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CALIB_FILES = {"cwru": os.path.join(HERE, "calibrated_cwru.json"),
@@ -39,13 +39,7 @@ def cfg_to_json(cfg: SimConfig) -> str:
     return json.dumps(asdict(cfg), sort_keys=True, default=list)
 
 
-def cfg_from_dict(d: dict) -> SimConfig:
-    d = dict(d)
-    tup = lambda m: tuple(tuple(x) for x in m)
-    d["modes"] = tup(d["modes"])
-    d["fault_modes"] = {k: tup(v) for k, v in d.get("fault_modes", {}).items()}
-    d["shaft_harm_amp"] = tuple(d["shaft_harm_amp"])
-    return SimConfig(**d)
+cfg_from_dict = config_from_dict
 
 
 def load_calibrated(kind):
@@ -60,9 +54,13 @@ def load_calibrated(kind):
     return {k: cfg_from_dict(v) for k, v in d.items() if not k.startswith("_")}
 
 
+_NUM_CASE_FIELDS = ("case_gfrac", "case_drift", "case_bg", "case_jitter", "case_scatter",
+                    "case_kappa", "case_mod", "case_drift_tau")
+
+
 def with_size(cfg: SimConfig, fault: str, size_in: float) -> SimConfig:
-    """Calibrated per-case amplitudes: interpolate between the measured sizes
-    (clamped at the ends) so any size in mm can be requested."""
+    """Calibrated per-case values: interpolate between the measured sizes (clamped at the ends) so any
+    size in mm can be requested. Resonance modes use the nearest measured size."""
     pts = sorted((float(k.split("@")[1]), v) for k, v in cfg.case_gain.items()
                  if k.startswith(fault + "@"))
     if not pts:
@@ -70,24 +68,45 @@ def with_size(cfg: SimConfig, fault: str, size_in: float) -> SimConfig:
     s, a = zip(*pts)
     key = f"{fault}@{size_in:.3f}"
     out = replace(cfg, case_gain={**cfg.case_gain, key: float(np.interp(size_in, s, a))})
-    for fld in ("case_gfrac", "case_drift"):          # same interpolation for the realism values
+    for fld in _NUM_CASE_FIELDS:
         d = getattr(cfg, fld)
         v = [(sz, d[f"{fault}@{sz:.3f}"]) for sz in s if f"{fault}@{sz:.3f}" in d]
         if v:
             sv, vv = zip(*v)
             out = replace(out, **{fld: {**d, key: float(np.interp(size_in, sv, vv))}})
+    near = min(s, key=lambda z: abs(z - size_in))
+    nk = f"{fault}@{near:.3f}"
+    if nk in cfg.case_modes:
+        out = replace(out, case_modes={**cfg.case_modes, key: cfg.case_modes[nk]})
+    eqs = [(sz, cfg.case_eq[f"{fault}@{sz:.3f}"]) for sz in s if f"{fault}@{sz:.3f}" in cfg.case_eq]
+    if eqs:
+        grid = eqs[0][1][0]
+        db = np.array([np.asarray(e[1][1]) for e in eqs])
+        sv = [e[0] for e in eqs]
+        row = [float(np.interp(size_in, sv, db[:, j])) for j in range(db.shape[1])]
+        out = replace(out, case_eq={**cfg.case_eq, key: (tuple(grid), tuple(round(v, 2) for v in row))})
     return out
 
 
 def generate(bearing, faults, size_mm, rpm, cfg, load_hp, seed):
-    """Background (noise + shaft harmonics) added ONCE; fault components summed."""
+    """One fault (or none): the calibrated generator exactly as fitted. Several faults: the fault
+    components are summed on one shared background (an approximation of the calibrated cases)."""
     size_in = size_mm / MM_PER_IN
-    x, _ = simulate(bearing, "normal", 0.0, rpm, cfg, load_hp, seed)
+    if len(faults) <= 1:
+        f = faults[0] if faults else "normal"
+        x, _ = simulate(bearing, f, 0.0 if f == "normal" else size_in, rpm,
+                        with_size(cfg, f, size_in) if f != "normal" else cfg, load_hp, seed)
+        return x, ({faults[0]: x} if faults else {})
+    bg_scale = float(np.mean([cfg.case_bg.get(f"{f}@{size_in:.3f}",
+                                              with_size(cfg, f, size_in).case_bg.get(f"{f}@{size_in:.3f}", 1.0))
+                              for f in faults])) if cfg.case_bg else 1.0
+    bg_cfg = replace(cfg, bg_lines=(), case_eq={}, noise_std=cfg.noise_std * bg_scale,
+                     coloured_noise_std=cfg.coloured_noise_std * bg_scale)
+    x, _ = simulate(bearing, "normal", 0.0, rpm, bg_cfg, load_hp, seed)
     quiet = replace(cfg, noise_std=0.0, coloured_noise_std=0.0, shaft_harm_amp=(0, 0, 0))
     comps = {}
     for i, f in enumerate(faults):
-        xf, _ = simulate(bearing, f, size_in, rpm, with_size(quiet, f, size_in),
-                         load_hp, seed + 1 + i)
+        xf, _ = simulate(bearing, f, size_in, rpm, with_size(quiet, f, size_in), load_hp, seed + 1 + i)
         comps[f] = xf
         x = x + xf
     return x, comps
@@ -261,6 +280,21 @@ with st.sidebar.expander("Realism controls", expanded=manual):
     r_nmod = st.slider("Slow noise-level modulation", 0.0, 1.0, 0.0, 0.1, disabled=not manual)
     r_nmod_tau = st.slider("Noise modulation time [s]", 0.1, 5.0, 1.0, 0.1, disabled=not manual)
 
+st.sidebar.header("Recorder and background")
+use_eq = use_shape = use_lines = True
+aa_default = float(calib.aa_fc) if (use_calib and calib is not None) else 0.0
+if use_calib:
+    use_eq = st.sidebar.checkbox("Spectral correction fitted to real spectra", True,
+                                 help="Smooth, power-preserving transfer-function correction per fault case "
+                                      "(fixes the spectral balance the resonance modes cannot capture).")
+    use_shape = st.sidebar.checkbox("Background spectrum shaped like the real recording", True,
+                                    help="Off: plain white background noise of the same power.")
+    use_lines = st.sidebar.checkbox("Interference lines of the real healthy recording", True,
+                                    help="Narrow lines (e.g. ~1.04 kHz in the CWRU normal file); healthy class only.")
+aa_cut = st.sidebar.slider("Recorder anti-aliasing low-pass edge [Hz] (0 = none)", 0, int(fs * 0.49),
+                           int(min(aa_default, fs * 0.49)), 50, key=f"aa_{preset}_{use_calib}",
+                           help="Real CWRU data falls ~60 dB between 5.4 and 5.9 kHz; the calibration fits this edge.")
+
 st.sidebar.header("Visualization")
 zoom_ms = st.sidebar.slider("Time-plot window [ms]", 20, 1000, 200)
 lo_def = int(min(P["band"][0], 0.40 * fs))
@@ -298,15 +332,25 @@ else:
 
 # ------------------------------------------------------ apply realism options
 _zero = dict(gfrac=0.0, fault_gfrac={}, case_gfrac={}, amp_drift_std=0.0, fault_drift={}, case_drift={},
-             bg_burst_rate=0.0, bg_burst_amp=0.0, noise_tail_dof=0.0, noise_mod_depth=0.0)
+             bg_burst_rate=0.0, bg_burst_amp=0.0, noise_tail_dof=0.0, noise_mod_depth=0.0,
+             case_kappa={}, case_drift_tau={}, case_mod={}, case_bg={})
 if not realism_on:
-    cfg = replace(cfg, **_zero)
-elif manual:
-    noise_rms = float(np.sqrt(cfg.noise_std ** 2 + cfg.coloured_noise_std ** 2))
-    cfg = replace(cfg, **{**_zero, "gfrac": r_gfrac, "amp_drift_std": r_drift,
-                          "bg_burst_rate": r_burst_rate, "bg_burst_amp": r_burst_amp * noise_rms,
-                          "noise_tail_dof": float(r_tail), "noise_mod_depth": r_nmod},
-                  gauss_kappa=r_kappa, amp_drift_tau=r_drift_tau, noise_mod_tau=r_nmod_tau)
+    cfg = replace(cfg, **_zero, aa_fc=0.0, bg_shape_f=(), bg_shape_db=(), bg_lines=(), case_eq={})
+else:
+    if manual:
+        noise_rms = float(np.sqrt(cfg.noise_std ** 2 + cfg.coloured_noise_std ** 2))
+        cfg = replace(cfg, **{**_zero, "gfrac": r_gfrac, "amp_drift_std": r_drift,
+                              "bg_burst_rate": r_burst_rate, "bg_burst_amp": r_burst_amp * noise_rms,
+                              "noise_tail_dof": float(r_tail), "noise_mod_depth": r_nmod},
+                      gauss_kappa=r_kappa, amp_drift_tau=r_drift_tau, noise_mod_tau=r_nmod_tau)
+    if use_calib:
+        if not use_eq:
+            cfg = replace(cfg, case_eq={})
+        if not use_shape:
+            cfg = replace(cfg, bg_shape_f=(), bg_shape_db=())
+        if not use_lines:
+            cfg = replace(cfg, bg_lines=())
+    cfg = replace(cfg, aa_fc=float(aa_cut))
 
 # ----------------------------------------------------------- frequencies
 fr = rpm / 60.0
@@ -414,6 +458,9 @@ with tabs[4]:
     b_sizes = c2.text_input("Severities (L, M, H)" if is_sq else "Fault sizes [mm]",
                             "L, M, H" if is_sq else "0.1778, 0.3556, 0.5334")
     b_segs = int(c3.number_input("Windows per class/size", min_value=1, value=50))
+    b_recs = int(c3.number_input("Independent records per class/size", min_value=1, value=5,
+                                 help="Each record is a separate simulation (own random seed). Split train/test by "
+                                      "record_id, not by window, to avoid leakage between neighbouring windows."))
     b_win = int(c3.number_input("Window length [samples]", min_value=256, value=2048, step=256))
     if st.button("Generate dataset"):
         try:
@@ -427,26 +474,32 @@ with tabs[4]:
             st.error("Could not parse the fault sizes.")
         combos = [(f, s) for f in b_faults for s in ([("-" if is_sq else 0.0, 0.0)] if f == "normal" else sizes)]
         if combos:
-            Xs, lab, sz = [], [], []
+            Xs, lab, sz, rid = [], [], [], []
             bar = st.progress(0.0)
+            n_rec = max(1, min(b_recs, b_segs))
+            per_rec = [b_segs // n_rec + (1 if j < b_segs % n_rec else 0) for j in range(n_rec)]
+            total = len(combos) * n_rec
+            done = 0
             for i, (f, s) in enumerate(combos):
-                dur = b_segs * b_win / fs
-                cfg_b = replace(cfg, duration=dur)
-                xb, _ = generate(bearing, [] if f == "normal" else [f], s[1], rpm, cfg_b,
-                                 load_hp, seed + 1000 * (i + 1))
-                Xs.append(xb[: b_segs * b_win].reshape(b_segs, b_win))
-                lab += [f] * b_segs
-                sz += [s[0]] * b_segs
-                bar.progress((i + 1) / len(combos))
+                for j, nw in enumerate(per_rec):
+                    cfg_b = replace(cfg, duration=nw * b_win / fs)
+                    xb, _ = generate(bearing, [] if f == "normal" else [f], s[1], rpm, cfg_b,
+                                     load_hp, seed + 1000 * (i + 1) + 17 * j)
+                    Xs.append(xb[: nw * b_win].reshape(nw, b_win))
+                    lab += [f] * nw
+                    sz += [s[0]] * nw
+                    rid += [i * n_rec + j] * nw
+                    done += 1
+                    bar.progress(done / total)
             buf = io.BytesIO()
             size_key = "severity" if is_sq else "size_mm"
             np.savez_compressed(buf, X=np.concatenate(Xs).astype(np.float32), fault=np.array(lab),
-                                rpm=rpm, fs=fs, **{size_key: np.array(sz)})
+                                rpm=rpm, fs=fs, record_id=np.array(rid), **{size_key: np.array(sz)})
             st.session_state["batch_npz"] = buf.getvalue()
-            st.session_state["batch_info"] = f"{len(lab)} windows x {b_win} samples, {len(combos)} class/size combos"
+            st.session_state["batch_info"] = f"{len(lab)} windows x {b_win} samples, {len(combos)} class/size combos x {n_rec} records"
     if "batch_npz" in st.session_state:
         st.success(st.session_state["batch_info"])
-        st.download_button("Download dataset (.npz: X, fault, size_mm or severity, rpm, fs)",
+        st.download_button("Download dataset (.npz: X, fault, size_mm or severity, record_id, rpm, fs)",
                            st.session_state["batch_npz"], "bearing_synthetic_dataset.npz")
 
 # ----------------------------------------------------------- downloads
